@@ -155,19 +155,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 prompt = data['text']
                 logger.info(f"Received prompt: {prompt}")
                 
-                # Signal UI that speaking is starting
                 await websocket.send_text(json.dumps({"type": "state", "value": "speaking"}))
                 
-                # Get Streaming response from Gemini
                 async for chunk, is_final in gemini.generate_response_streaming(prompt):
                     if chunk:
-                        # Send raw audio bytes to browser UI for playback
                         await websocket.send_bytes(chunk)
                     
                     if is_final:
                         break
                 
-                # Signal UI that speaking is done
                 await websocket.send_text(json.dumps({"type": "state", "value": "idle"}))
 
     except WebSocketDisconnect:
