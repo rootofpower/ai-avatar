@@ -1,0 +1,6 @@
+google-genai
+aiohttp
+paho-mqtt==2.1.0
+python-dotenv
+fastapi
+uvicorn
