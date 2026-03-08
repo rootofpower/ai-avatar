@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OLA - AI Assistant</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #0d1117; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; color: white; font-family: 'Inter', sans-serif; overflow: hidden; }
+        #video-container { position: relative; width: 512px; height: 512px; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); background-color: #161b22; }
+        #live-canvas { width: 100%; height: 100%; display: block; }
+        .controls { margin-top: 20px; display: flex; gap: 10px; z-index: 10; }
+        input { padding: 10px; width: 300px; border-radius: 5px; border: none; outline: none; background: #21262d; color: white; }
+        input::placeholder { color: #8b949e; }
+        button { padding: 10px 20px; border-radius: 5px; border: none; background-color: #2ea043; color: white; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #3fb950; }
+        #status { margin-top: 10px; font-size: 0.9em; color: #8b949e; z-index: 10; }
+    </style>
+    <!-- Import map for Three.js and VRM -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+          "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@2.1.2/lib/three-vrm.module.js"
+        }
+      }
+    </script>
+</head>
+<body>
+    <div id="video-container">
+        <canvas id="live-canvas"></canvas>
+    </div>
+
+    <div class="controls">
+        <input type="text" id="chat-input" placeholder="Type to talk to OLA..." autocomplete="off" />
+        <button id="send-btn">Send</button>
+    </div>
+    <div id="status">Status: Disconnected</div>
+
+    <script type="module" src="/static/script.js"></script>
+</body>
+</html>
