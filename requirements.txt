@@ -1,6 +1,35 @@
+# Existing
 google-genai
 aiohttp
 paho-mqtt==2.1.0
 python-dotenv
 fastapi
 uvicorn
+
+# Avatar pipeline - PyTorch
+torch
+torchvision
+torchaudio
+
+# Avatar pipeline - ML models
+transformers
+diffusers
+accelerate
+einops
+librosa
+
+# Avatar pipeline - Image processing
+opencv-python-headless
+Pillow
+numpy
+scipy
+
+# Avatar pipeline - Face detection (mmlab)
+openmim
+
+# Avatar pipeline - WebRTC
+aiortc
+av
+
+# Avatar pipeline - Misc
+omegaconf

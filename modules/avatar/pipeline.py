@@ -1,0 +1,208 @@
+
+import asyncio
+import time
+from typing import Optional
+
+from modules.avatar.audio_splitter import AudioSplitter
+from modules.avatar.audio_delay_buffer import AudioDelayBuffer
+from modules.avatar.audio_feature_extractor import AudioFeatureExtractor
+from modules.avatar.visual_frame_generator import VisualFrameGenerator
+from modules.avatar.video_encoder import VideoEncoder
+from modules.avatar.av_muxer import AVMuxer
+from modules.avatar.webrtc_server import WebRTCServer
+
+
+class AvatarPipeline:
+    """
+    Orchestrates all avatar pipeline components:
+    AudioSplitter → AFE → VFG → VideoEncoder → AVMuxer → WebRTC
+
+    Integrates with the existing VoiceAssistant by receiving
+    Gemini's streaming audio chunks via feed_audio().
+    """
+
+    def __init__(
+        self,
+        models_dir: str = "./models",
+        avatar_image: Optional[str] = None,
+        device: str = "cuda",
+        fps: int = 25,
+        webrtc_port: int = 8080,
+        stun_server: str = "stun:stun.l.google.com:19302",
+    ):
+        self._models_dir = models_dir
+        self._avatar_image = avatar_image
+        self._device = device
+        self._fps = fps
+        self._webrtc_port = webrtc_port
+        self._stun_server = stun_server
+
+        # Pipeline components
+        self.splitter = AudioSplitter()
+        self.delay_buffer = AudioDelayBuffer()
+        self.afe = AudioFeatureExtractor(
+            whisper_dir=f"{models_dir}/whisper",
+            device=device,
+            fps=fps,
+        )
+        self.vfg = VisualFrameGenerator(
+            models_dir=models_dir,
+            device=device,
+        )
+        self.encoder = VideoEncoder(fps=fps)
+        self.muxer = AVMuxer(self.delay_buffer)
+        self.webrtc = WebRTCServer(self.muxer, stun_server=stun_server)
+
+        self._inference_task: Optional[asyncio.Task] = None
+        self._transport_task: Optional[asyncio.Task] = None
+        self._running = False
+        self._gpu_available = False
+
+    async def start(self) -> bool:
+        """
+        Load models and start pipeline workers.
+        Returns True if GPU pipeline is active, False if degraded (audio-only).
+        """
+        print("[Pipeline] Starting avatar pipeline...")
+
+        # Check GPU availability
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                print("[Pipeline] WARNING: No CUDA GPU detected. Avatar pipeline disabled.")
+                return False
+            gpu_name = torch.cuda.get_device_name(0)
+            vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            print(f"[Pipeline] GPU: {gpu_name} ({vram:.1f} GB VRAM)")
+        except Exception as e:
+            print(f"[Pipeline] GPU check failed: {e}. Avatar pipeline disabled.")
+            return False
+
+        # Load models
+        try:
+            self.afe.load()
+            self.vfg.load()
+            self.encoder.init()
+        except Exception as e:
+            print(f"[Pipeline] Model loading failed: {e}. Avatar pipeline disabled.")
+            return False
+
+        # Set reference image if provided
+        if self._avatar_image:
+            try:
+                self.vfg.set_reference_image(self._avatar_image)
+            except FileNotFoundError as e:
+                print(f"[Pipeline] Avatar image not found: {e}")
+                print("[Pipeline] Pipeline will wait for avatar image to be set.")
+
+        # Start worker tasks
+        self._running = True
+        self._inference_task = asyncio.create_task(self._inference_worker())
+        self._transport_task = asyncio.create_task(self._transport_worker())
+        self._gpu_available = True
+
+        print("[Pipeline] Avatar pipeline started successfully.")
+        return True
+
+    async def feed_audio(self, pcm_24k: bytes) -> None:
+        """
+        Feed raw 24kHz PCM audio from Gemini into the pipeline.
+        Called by VoiceAssistant's streaming loop.
+        """
+        if not self._running:
+            return
+        await self.splitter.feed(pcm_24k)
+
+    async def _inference_worker(self) -> None:
+        """
+        Continuously pulls 200ms chunks from the inference queue,
+        extracts audio features, generates video frames, and submits
+        them to the muxer.
+        """
+        print("[Pipeline] Inference worker started.")
+        while self._running:
+            try:
+                chunk = await asyncio.wait_for(
+                    self.splitter.inference_queue.get(), timeout=0.5
+                )
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            if not self.vfg.has_reference:
+                continue
+
+            try:
+                t_start = time.monotonic()
+
+                # Audio Feature Extraction (Whisper)
+                audio_prompt = self.afe.extract(chunk['pcm'])
+
+                # Visual Frame Generation (MuseTalk)
+                frame = self.vfg.generate_frame(audio_prompt)
+
+                if frame is not None:
+                    t_elapsed = (time.monotonic() - t_start) * 1000
+                    # Submit to muxer
+                    await self.muxer.submit_frame(frame, chunk['pts'])
+
+            except Exception as e:
+                print(f"[Pipeline] Inference error: {e}")
+
+    async def _transport_worker(self) -> None:
+        """
+        Continuously moves audio from the splitter's transport queue
+        to the delay buffer.
+        """
+        print("[Pipeline] Transport worker started.")
+        while self._running:
+            try:
+                segment = await asyncio.wait_for(
+                    self.splitter.transport_queue.get(), timeout=0.5
+                )
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            await self.delay_buffer.write(segment)
+
+    async def stop(self) -> None:
+        """Stop pipeline and clean up."""
+        print("[Pipeline] Stopping avatar pipeline...")
+        self._running = False
+
+        if self._inference_task:
+            self._inference_task.cancel()
+            try:
+                await self._inference_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._transport_task:
+            self._transport_task.cancel()
+            try:
+                await self._transport_task
+            except asyncio.CancelledError:
+                pass
+
+        self.splitter.reset()
+        await self.delay_buffer.reset()
+        await self.muxer.reset()
+        print("[Pipeline] Avatar pipeline stopped.")
+
+    def reset_for_new_turn(self) -> None:
+        """Reset buffers for a new conversation turn (keep models loaded)."""
+        self.splitter.reset()
+
+    @property
+    def is_active(self) -> bool:
+        return self._running and self._gpu_available
+
+    def set_reference_image(self, image_path: str) -> None:
+        """Set or change the avatar reference image at runtime."""
+        self._avatar_image = image_path
+        if self.vfg.is_loaded:
+            self.vfg.set_reference_image(image_path)
+            print(f"[Pipeline] Reference image updated: {image_path}")
