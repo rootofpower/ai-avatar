@@ -21,36 +21,101 @@ import time as _time
 
 class IdleAnimator:
     """
-    Generates subtle idle animation from a static reference image.
-    Uses only vertical shift + slight zoom to simulate breathing.
-    No rotation — it looks unnatural on flat photos.
+    Generates idle animation for the avatar when not speaking.
+
+    Two modes:
+    1. Driving video (preferred): Loops a short video of natural idle behavior
+       (breathing, head movements, blinks). Set via set_driving_video().
+    2. Static fallback: Subtle vertical shift on the reference image.
+
     Pure CPU — no GPU needed.
     """
 
     def __init__(self, reference_image: Optional[np.ndarray] = None, fps: int = 25):
         self._ref = None
-        self._padded = None  # padded version for smooth cropping
+        self._padded = None
         self._fps = fps
-        self._start_time = _time.monotonic()
         self._size = 512
-        self._pad = 8  # extra pixels around the image for smooth shifting
+        self._pad = 8
+
+        # Driving video mode
+        self._video_frames: list = []
+        self._video_idx: int = 0
+        self._video_direction: int = 1  # 1=forward, -1=backward (ping-pong)
+
+        self._start_time = _time.monotonic()
         if reference_image is not None:
             self.set_reference(reference_image)
 
     def set_reference(self, image: np.ndarray) -> None:
-        """Set or update the reference image (BGR, resized to 512x512)."""
-        if image.shape[0] != self._size or image.shape[1] != self._size:
-            image = cv2.resize(image, (self._size, self._size), interpolation=cv2.INTER_LANCZOS4)
+        """Set or update the reference image (BGR, center-cropped to 512x512)."""
+        h, w = image.shape[:2]
+        if h != self._size or w != self._size:
+            # Resize preserving aspect ratio (fit the larger dimension)
+            scale = self._size / min(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            # Center crop to 512x512
+            y_off = (new_h - self._size) // 2
+            x_off = (new_w - self._size) // 2
+            image = image[y_off:y_off + self._size, x_off:x_off + self._size]
         self._ref = image.copy()
-        # Create a padded version so we can shift without black borders
         p = self._pad
         self._padded = cv2.copyMakeBorder(
             self._ref, p, p, p, p, cv2.BORDER_REFLECT_101
         )
         self._start_time = _time.monotonic()
 
+    def set_driving_video(self, video_path: str) -> bool:
+        """
+        Load a short driving video for idle animation.
+        All frames are cached in memory for smooth looping.
+        Returns True if loaded successfully.
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"[IdleAnimator] Cannot open driving video: {video_path}")
+            return False
+
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Resize to target size
+            if frame.shape[0] != self._size or frame.shape[1] != self._size:
+                frame = cv2.resize(frame, (self._size, self._size), interpolation=cv2.INTER_LANCZOS4)
+            frames.append(frame)
+        cap.release()
+
+        if not frames:
+            print(f"[IdleAnimator] Driving video is empty: {video_path}")
+            return False
+
+        self._video_frames = frames
+        self._video_idx = 0
+        self._video_direction = 1
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        duration = len(frames) / video_fps
+        print(f"[IdleAnimator] Driving video loaded: {len(frames)} frames, {duration:.1f}s (ping-pong loop)")
+        return True
+
     def generate(self) -> Optional[np.ndarray]:
-        """Generate one idle-animated frame based on elapsed time."""
+        """Generate one idle-animated frame."""
+
+        # Mode 1: Driving video (preferred)
+        if self._video_frames:
+            frame = self._video_frames[self._video_idx]
+            # Ping-pong: play forward then backward for seamless loop
+            self._video_idx += self._video_direction
+            if self._video_idx >= len(self._video_frames) - 1:
+                self._video_direction = -1
+            elif self._video_idx <= 0:
+                self._video_direction = 1
+            return frame.copy()
+
+        # Mode 2: Static image fallback
         if self._padded is None:
             return None
 
@@ -58,29 +123,24 @@ class IdleAnimator:
         p = self._pad
         s = self._size
 
-        # Breathing: vertical shift only (period ~3.8s, max ~2px up)
         dy = -2.0 * math.sin(2 * math.pi * t / 3.8)
-        # Secondary breathing harmonic for realism
         dy += -0.5 * math.sin(2 * math.pi * t / 2.0)
 
-        # Convert to integer pixel offset within the padded image
         oy = int(round(p + dy))
-        ox = p  # no horizontal shift
-
-        # Crop from padded image (this gives smooth "breathing" movement)
+        ox = p
         frame = self._padded[oy:oy + s, ox:ox + s].copy()
-
         return frame
 
 
 class AvatarVideoTrack(MediaStreamTrack):
     """
     Custom video track that pulls frames from the AVMuxer's video queue.
-    When idle (no frames from pipeline), shows animated reference image.
+    When idle (no frames from pipeline), shows driving video or animated reference.
     """
     kind = "video"
 
-    def __init__(self, muxer, fps: int = 25, reference_image: Optional[np.ndarray] = None):
+    def __init__(self, muxer, fps: int = 25, reference_image: Optional[np.ndarray] = None,
+                 driving_video: Optional[str] = None):
         super().__init__()
         self._muxer = muxer
         self._fps = fps
@@ -88,9 +148,14 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._time_base = fractions.Fraction(1, fps)
         self._frame_duration = 1.0 / fps
         self._idle = IdleAnimator(reference_image, fps)
+        if driving_video:
+            self._idle.set_driving_video(driving_video)
 
     def set_reference_image(self, image: np.ndarray) -> None:
         self._idle.set_reference(image)
+
+    def set_driving_video(self, video_path: str) -> bool:
+        return self._idle.set_driving_video(video_path)
 
     async def recv(self) -> VideoFrame:
         """Return the next video frame for WebRTC transmission."""
@@ -178,11 +243,16 @@ class WebRTCServer:
         self._stun_server = stun_server
         self._pcs: set = set()
         self._reference_image: Optional[np.ndarray] = None
+        self._driving_video: Optional[str] = None
         self.app = self._create_app()
 
     def set_reference_image(self, image: np.ndarray) -> None:
         """Set the reference image for idle animation."""
         self._reference_image = image.copy()
+
+    def set_driving_video(self, video_path: str) -> None:
+        """Set the driving video for idle animation."""
+        self._driving_video = video_path
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="Avatar WebRTC Server")
@@ -235,7 +305,11 @@ class WebRTCServer:
                     self._pcs.discard(pc)
 
             # Add avatar media tracks
-            video_track = AvatarVideoTrack(self._muxer, reference_image=self._reference_image)
+            video_track = AvatarVideoTrack(
+                self._muxer,
+                reference_image=self._reference_image,
+                driving_video=self._driving_video,
+            )
             audio_track = AvatarAudioTrack(self._muxer)
             pc.addTrack(video_track)
             pc.addTrack(audio_track)

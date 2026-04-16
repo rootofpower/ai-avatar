@@ -25,6 +25,7 @@ class AvatarPipeline:
         self,
         models_dir: str = "./models",
         avatar_image: Optional[str] = None,
+        idle_video: Optional[str] = None,
         device: str = "cuda",
         fps: int = 25,
         webrtc_port: int = 8080,
@@ -32,6 +33,7 @@ class AvatarPipeline:
     ):
         self._models_dir = models_dir
         self._avatar_image = avatar_image
+        self._idle_video = idle_video
         self._device = device
         self._fps = fps
         self._webrtc_port = webrtc_port
@@ -97,6 +99,14 @@ class AvatarPipeline:
             except FileNotFoundError as e:
                 print(f"[Pipeline] Avatar image not found: {e}")
                 print("[Pipeline] Pipeline will wait for avatar image to be set.")
+
+        # Set driving video for idle animation if provided
+        if self._idle_video:
+            import os
+            if os.path.exists(self._idle_video):
+                self.webrtc.set_driving_video(self._idle_video)
+            else:
+                print(f"[Pipeline] Idle video not found: {self._idle_video}")
 
         # Start worker tasks
         self._running = True

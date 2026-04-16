@@ -1,5 +1,6 @@
 
 import asyncio
+import logging
 import os
 import threading
 from typing import Optional
@@ -11,11 +12,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Suppress noisy third-party debug logs
+for _logger_name in [
+    "aiortc", "aioice", "websockets", "av",
+    "aiortc.rtcrtpsender", "aiortc.rtcrtpreceiver",
+    "aiortc.rtcpeerconnection", "aioice.ice",
+    "websockets.client",
+]:
+    logging.getLogger(_logger_name).setLevel(logging.WARNING)
+
 AVATAR_ENABLED = os.getenv("AVATAR_ENABLED", "false").lower() == "true"
 AVATAR_IMAGE = os.getenv("AVATAR_IMAGE", "")
+AVATAR_IDLE_VIDEO = os.getenv("AVATAR_IDLE_VIDEO", "")
 WEBRTC_PORT = int(os.getenv("WEBRTC_PORT", "8080"))
 
-print(f"[Config] AVATAR_ENABLED={AVATAR_ENABLED}, AVATAR_IMAGE='{AVATAR_IMAGE}', WEBRTC_PORT={WEBRTC_PORT}")
+print(f"[Config] AVATAR_ENABLED={AVATAR_ENABLED}, AVATAR_IMAGE='{AVATAR_IMAGE}', AVATAR_IDLE_VIDEO='{AVATAR_IDLE_VIDEO}'")
 
 
 class VoiceAssistant:
@@ -72,6 +83,7 @@ class VoiceAssistant:
             self.avatar_pipeline = AvatarPipeline(
                 models_dir="./models",
                 avatar_image=AVATAR_IMAGE if AVATAR_IMAGE else None,
+                idle_video=AVATAR_IDLE_VIDEO if AVATAR_IDLE_VIDEO else None,
                 webrtc_port=WEBRTC_PORT,
             )
             active = await self.avatar_pipeline.start()
@@ -133,10 +145,15 @@ class VoiceAssistant:
             # Save and play complete audio
             if audio_chunks:
                 complete_audio = b"".join(audio_chunks)
+                audio_size_kb = len(complete_audio) / 1024
+                duration_s = len(complete_audio) / (24000 * 2)  # 24kHz, 16-bit
+                print(f"[Gemini] Response: {len(audio_chunks)} chunks, {audio_size_kb:.1f} KB, ~{duration_s:.1f}s audio")
                 audio_filename = "response_audio.wav"
                 self._save_audio(complete_audio, audio_filename)
                 print(f"Playing audio...")
                 os.system(f"aplay {audio_filename} > /dev/null 2>&1 &")
+            else:
+                print("[Gemini] No audio received!")
             
             self.input_queue.task_done()
 
