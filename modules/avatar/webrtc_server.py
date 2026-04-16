@@ -22,62 +22,54 @@ import time as _time
 class IdleAnimator:
     """
     Generates subtle idle animation from a static reference image.
-    Applies breathing (vertical scale) + head sway (rotation) + slight drift.
-    Uses multiple overlapping sine waves for organic motion.
+    Uses only vertical shift + slight zoom to simulate breathing.
+    No rotation — it looks unnatural on flat photos.
     Pure CPU — no GPU needed.
     """
 
     def __init__(self, reference_image: Optional[np.ndarray] = None, fps: int = 25):
-        self._ref = reference_image
+        self._ref = None
+        self._padded = None  # padded version for smooth cropping
         self._fps = fps
         self._start_time = _time.monotonic()
+        self._size = 512
+        self._pad = 8  # extra pixels around the image for smooth shifting
+        if reference_image is not None:
+            self.set_reference(reference_image)
 
     def set_reference(self, image: np.ndarray) -> None:
         """Set or update the reference image (BGR, resized to 512x512)."""
-        if image.shape[0] != 512 or image.shape[1] != 512:
-            image = cv2.resize(image, (512, 512), interpolation=cv2.INTER_LANCZOS4)
+        if image.shape[0] != self._size or image.shape[1] != self._size:
+            image = cv2.resize(image, (self._size, self._size), interpolation=cv2.INTER_LANCZOS4)
         self._ref = image.copy()
+        # Create a padded version so we can shift without black borders
+        p = self._pad
+        self._padded = cv2.copyMakeBorder(
+            self._ref, p, p, p, p, cv2.BORDER_REFLECT_101
+        )
         self._start_time = _time.monotonic()
-
-    def _ease(self, t: float, period: float) -> float:
-        """Smooth sinusoidal easing."""
-        return math.sin(2 * math.pi * t / period)
 
     def generate(self) -> Optional[np.ndarray]:
         """Generate one idle-animated frame based on elapsed time."""
-        if self._ref is None:
+        if self._padded is None:
             return None
 
         t = _time.monotonic() - self._start_time
-        h, w = self._ref.shape[:2]
-        cx, cy = w / 2.0, h / 2.0
+        p = self._pad
+        s = self._size
 
-        # Breathing: very gentle vertical scale, two harmonics for realism
-        breath = 1.0 + 0.008 * self._ease(t, 3.8) + 0.003 * self._ease(t, 2.1)
+        # Breathing: vertical shift only (period ~3.8s, max ~2px up)
+        dy = -2.0 * math.sin(2 * math.pi * t / 3.8)
+        # Secondary breathing harmonic for realism
+        dy += -0.5 * math.sin(2 * math.pi * t / 2.0)
 
-        # Head sway: very slow rotation, two harmonics
-        angle = 0.6 * self._ease(t, 6.0) + 0.3 * self._ease(t, 4.3)
+        # Convert to integer pixel offset within the padded image
+        oy = int(round(p + dy))
+        ox = p  # no horizontal shift
 
-        # Subtle drift: tiny shifts
-        dx = 1.5 * self._ease(t, 8.0) + 0.8 * self._ease(t, 5.5)
-        dy = 1.0 * self._ease(t, 4.5)
+        # Crop from padded image (this gives smooth "breathing" movement)
+        frame = self._padded[oy:oy + s, ox:ox + s].copy()
 
-        # Build rotation matrix centered on image
-        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-
-        # Apply breathing as vertical scale around center
-        M[1, 1] *= breath
-        M[1, 2] += (1.0 - breath) * cy  # keep center stable
-
-        # Apply drift
-        M[0, 2] += dx
-        M[1, 2] += dy
-
-        frame = cv2.warpAffine(
-            self._ref, M, (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT_101,
-        )
         return frame
 
 
