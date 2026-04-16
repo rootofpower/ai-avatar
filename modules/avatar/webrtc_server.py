@@ -40,7 +40,8 @@ class AvatarVideoTrack(MediaStreamTrack):
             frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
         except (asyncio.TimeoutError, Exception):
             # No frame available — send a black frame to keep the stream alive
-            frame = VideoFrame(width=512, height=512, format='rgb24')
+            black = np.zeros((512, 512, 3), dtype=np.uint8)
+            frame = VideoFrame.from_ndarray(black, format='rgb24')
 
         frame.pts = self._pts
         frame.time_base = self._time_base
