@@ -14,20 +14,79 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 
+import cv2
+import math
+import time as _time
+
+
+class IdleAnimator:
+    """
+    Generates subtle idle animation from a static reference image.
+    Applies breathing (vertical scale) + head sway (rotation) + slight drift.
+    Pure CPU — no GPU needed.
+    """
+
+    def __init__(self, reference_image: Optional[np.ndarray] = None, fps: int = 25):
+        self._ref = reference_image
+        self._fps = fps
+        self._start_time = _time.monotonic()
+
+    def set_reference(self, image: np.ndarray) -> None:
+        """Set or update the reference image (BGR)."""
+        self._ref = image.copy()
+        self._start_time = _time.monotonic()
+
+    def generate(self) -> Optional[np.ndarray]:
+        """Generate one idle-animated frame based on elapsed time."""
+        if self._ref is None:
+            return None
+
+        t = _time.monotonic() - self._start_time
+        h, w = self._ref.shape[:2]
+        cx, cy = w / 2, h / 2
+
+        # Breathing: gentle vertical scale (period ~3.5s, amplitude ~1.5%)
+        breath = 1.0 + 0.015 * math.sin(2 * math.pi * t / 3.5)
+
+        # Head sway: slow rotation (period ~5s, amplitude ~1.2 degrees)
+        angle = 1.2 * math.sin(2 * math.pi * t / 5.0)
+
+        # Subtle drift: tiny horizontal shift (period ~7s, amplitude ~3px)
+        dx = 3.0 * math.sin(2 * math.pi * t / 7.0)
+        dy = 2.0 * math.sin(2 * math.pi * t / 4.2)
+
+        # Build affine transform
+        M = cv2.getRotationMatrix2D((cx + dx, cy + dy), angle, 1.0)
+        M[1, 1] *= breath
+        M[0, 2] += dx
+        M[1, 2] += dy - (breath - 1.0) * cy
+
+        frame = cv2.warpAffine(
+            self._ref, M, (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT_101,
+        )
+        return frame
+
+
 class AvatarVideoTrack(MediaStreamTrack):
     """
     Custom video track that pulls frames from the AVMuxer's video queue.
-    aiortc handles encoding (VP8/H264) and RTP packetization internally.
+    When idle (no frames from pipeline), shows animated reference image.
     """
     kind = "video"
 
-    def __init__(self, muxer, fps: int = 25):
+    def __init__(self, muxer, fps: int = 25, reference_image: Optional[np.ndarray] = None):
         super().__init__()
         self._muxer = muxer
         self._fps = fps
         self._pts = 0
         self._time_base = fractions.Fraction(1, fps)
         self._frame_duration = 1.0 / fps
+        self._idle = IdleAnimator(reference_image, fps)
+
+    def set_reference_image(self, image: np.ndarray) -> None:
+        self._idle.set_reference(image)
 
     async def recv(self) -> VideoFrame:
         """Return the next video frame for WebRTC transmission."""
@@ -39,14 +98,20 @@ class AvatarVideoTrack(MediaStreamTrack):
             frame_rgb = frame_bgr[:, :, ::-1].copy()
             frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
         except (asyncio.TimeoutError, Exception):
-            # No frame available — send a black frame to keep the stream alive
-            black = np.zeros((512, 512, 3), dtype=np.uint8)
-            frame = VideoFrame.from_ndarray(black, format='rgb24')
+            # No pipeline frame — use idle animation
+            idle_frame = self._idle.generate()
+            if idle_frame is not None:
+                frame_rgb = idle_frame[:, :, ::-1].copy()
+                frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
+            else:
+                black = np.zeros((512, 512, 3), dtype=np.uint8)
+                frame = VideoFrame.from_ndarray(black, format='rgb24')
 
         frame.pts = self._pts
         frame.time_base = self._time_base
         self._pts += 1
         return frame
+
 
 
 class AvatarAudioTrack(MediaStreamTrack):
@@ -108,7 +173,12 @@ class WebRTCServer:
         self._muxer = muxer
         self._stun_server = stun_server
         self._pcs: set = set()
+        self._reference_image: Optional[np.ndarray] = None
         self.app = self._create_app()
+
+    def set_reference_image(self, image: np.ndarray) -> None:
+        """Set the reference image for idle animation."""
+        self._reference_image = image.copy()
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="Avatar WebRTC Server")
@@ -161,7 +231,7 @@ class WebRTCServer:
                     self._pcs.discard(pc)
 
             # Add avatar media tracks
-            video_track = AvatarVideoTrack(self._muxer)
+            video_track = AvatarVideoTrack(self._muxer, reference_image=self._reference_image)
             audio_track = AvatarAudioTrack(self._muxer)
             pc.addTrack(video_track)
             pc.addTrack(audio_track)

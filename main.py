@@ -15,6 +15,8 @@ AVATAR_ENABLED = os.getenv("AVATAR_ENABLED", "false").lower() == "true"
 AVATAR_IMAGE = os.getenv("AVATAR_IMAGE", "")
 WEBRTC_PORT = int(os.getenv("WEBRTC_PORT", "8080"))
 
+print(f"[Config] AVATAR_ENABLED={AVATAR_ENABLED}, AVATAR_IMAGE='{AVATAR_IMAGE}', WEBRTC_PORT={WEBRTC_PORT}")
+
 
 class VoiceAssistant:
     """

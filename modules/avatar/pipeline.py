@@ -91,6 +91,9 @@ class AvatarPipeline:
         if self._avatar_image:
             try:
                 self.vfg.set_reference_image(self._avatar_image)
+                # Pass reference image to WebRTC for idle animation
+                if self.vfg._ref_image is not None:
+                    self.webrtc.set_reference_image(self.vfg._ref_image)
             except FileNotFoundError as e:
                 print(f"[Pipeline] Avatar image not found: {e}")
                 print("[Pipeline] Pipeline will wait for avatar image to be set.")
@@ -205,4 +208,7 @@ class AvatarPipeline:
         self._avatar_image = image_path
         if self.vfg.is_loaded:
             self.vfg.set_reference_image(image_path)
+            # Also update WebRTC idle animation
+            if self.vfg._ref_image is not None:
+                self.webrtc.set_reference_image(self.vfg._ref_image)
             print(f"[Pipeline] Reference image updated: {image_path}")
