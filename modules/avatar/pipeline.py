@@ -72,7 +72,7 @@ class AvatarPipeline:
                 print("[Pipeline] WARNING: No CUDA GPU detected. Avatar pipeline disabled.")
                 return False
             gpu_name = torch.cuda.get_device_name(0)
-            vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             print(f"[Pipeline] GPU: {gpu_name} ({vram:.1f} GB VRAM)")
         except Exception as e:
             print(f"[Pipeline] GPU check failed: {e}. Avatar pipeline disabled.")

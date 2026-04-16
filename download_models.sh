@@ -10,7 +10,7 @@ mkdir -p "$MODELS_DIR"
 echo "=== Downloading MuseTalk V1.5 weights ==="
 mkdir -p "$MODELS_DIR/musetalkV15"
 if [ ! -f "$MODELS_DIR/musetalkV15/unet.pth" ]; then
-    huggingface-cli download TMElyralab/MuseTalk --include "musetalkV15/*" --local-dir "$MODELS_DIR/musetalkV15_tmp"
+    hf download TMElyralab/MuseTalk --include "musetalkV15/*" --local-dir "$MODELS_DIR/musetalkV15_tmp"
     mv "$MODELS_DIR/musetalkV15_tmp/musetalkV15/"* "$MODELS_DIR/musetalkV15/"
     rm -rf "$MODELS_DIR/musetalkV15_tmp"
     echo "[OK] MuseTalk V1.5"
@@ -21,7 +21,7 @@ fi
 echo "=== Downloading sd-vae-ft-mse ==="
 mkdir -p "$MODELS_DIR/sd-vae"
 if [ ! -f "$MODELS_DIR/sd-vae/diffusion_pytorch_model.bin" ]; then
-    huggingface-cli download stabilityai/sd-vae-ft-mse --local-dir "$MODELS_DIR/sd-vae"
+    hf download stabilityai/sd-vae-ft-mse --local-dir "$MODELS_DIR/sd-vae"
     echo "[OK] sd-vae-ft-mse"
 else
     echo "[SKIP] sd-vae already exists"
@@ -30,7 +30,7 @@ fi
 echo "=== Downloading whisper-tiny ==="
 mkdir -p "$MODELS_DIR/whisper"
 if [ ! -f "$MODELS_DIR/whisper/pytorch_model.bin" ]; then
-    huggingface-cli download openai/whisper-tiny --local-dir "$MODELS_DIR/whisper"
+    hf download openai/whisper-tiny --local-dir "$MODELS_DIR/whisper"
     echo "[OK] whisper-tiny"
 else
     echo "[SKIP] whisper-tiny already exists"
@@ -39,7 +39,7 @@ fi
 echo "=== Downloading DWPose ==="
 mkdir -p "$MODELS_DIR/dwpose"
 if [ ! -f "$MODELS_DIR/dwpose/dw-ll_ucoco_384.pth" ]; then
-    huggingface-cli download yzd-v/DWPose --include "dw-ll_ucoco_384.pth" --local-dir "$MODELS_DIR/dwpose"
+    hf download yzd-v/DWPose --include "dw-ll_ucoco_384.pth" --local-dir "$MODELS_DIR/dwpose"
     echo "[OK] DWPose"
 else
     echo "[SKIP] DWPose already exists"
@@ -65,7 +65,7 @@ fi
 echo "=== Downloading SyncNet ==="
 mkdir -p "$MODELS_DIR/syncnet"
 if [ ! -f "$MODELS_DIR/syncnet/latentsync_syncnet.pt" ]; then
-    huggingface-cli download ByteDance/LatentSync --include "latentsync_syncnet.pt" --local-dir "$MODELS_DIR/syncnet"
+    hf download ByteDance/LatentSync --include "latentsync_syncnet.pt" --local-dir "$MODELS_DIR/syncnet"
     echo "[OK] SyncNet"
 else
     echo "[SKIP] SyncNet already exists"

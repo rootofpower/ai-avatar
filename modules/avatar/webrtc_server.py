@@ -6,8 +6,7 @@ import json
 import numpy as np
 from typing import Optional
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
-from aiortc.contrib.media import MediaRelay
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCConfiguration, RTCIceServer
 from av import VideoFrame, AudioFrame
 
 from fastapi import FastAPI, Request
@@ -148,9 +147,9 @@ class WebRTCServer:
             params = await request.json()
             offer_sdp = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-            pc = RTCPeerConnection(configuration={
-                "iceServers": [{"urls": [self._stun_server]}]
-            })
+            pc = RTCPeerConnection(configuration=RTCConfiguration(
+                iceServers=[RTCIceServer(urls=[self._stun_server])]
+            ))
             self._pcs.add(pc)
 
             @pc.on("connectionstatechange")
