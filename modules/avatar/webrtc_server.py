@@ -23,6 +23,7 @@ class IdleAnimator:
     """
     Generates subtle idle animation from a static reference image.
     Applies breathing (vertical scale) + head sway (rotation) + slight drift.
+    Uses multiple overlapping sine waves for organic motion.
     Pure CPU — no GPU needed.
     """
 
@@ -32,9 +33,15 @@ class IdleAnimator:
         self._start_time = _time.monotonic()
 
     def set_reference(self, image: np.ndarray) -> None:
-        """Set or update the reference image (BGR)."""
+        """Set or update the reference image (BGR, resized to 512x512)."""
+        if image.shape[0] != 512 or image.shape[1] != 512:
+            image = cv2.resize(image, (512, 512), interpolation=cv2.INTER_LANCZOS4)
         self._ref = image.copy()
         self._start_time = _time.monotonic()
+
+    def _ease(self, t: float, period: float) -> float:
+        """Smooth sinusoidal easing."""
+        return math.sin(2 * math.pi * t / period)
 
     def generate(self) -> Optional[np.ndarray]:
         """Generate one idle-animated frame based on elapsed time."""
@@ -43,23 +50,28 @@ class IdleAnimator:
 
         t = _time.monotonic() - self._start_time
         h, w = self._ref.shape[:2]
-        cx, cy = w / 2, h / 2
+        cx, cy = w / 2.0, h / 2.0
 
-        # Breathing: gentle vertical scale (period ~3.5s, amplitude ~1.5%)
-        breath = 1.0 + 0.015 * math.sin(2 * math.pi * t / 3.5)
+        # Breathing: very gentle vertical scale, two harmonics for realism
+        breath = 1.0 + 0.008 * self._ease(t, 3.8) + 0.003 * self._ease(t, 2.1)
 
-        # Head sway: slow rotation (period ~5s, amplitude ~1.2 degrees)
-        angle = 1.2 * math.sin(2 * math.pi * t / 5.0)
+        # Head sway: very slow rotation, two harmonics
+        angle = 0.6 * self._ease(t, 6.0) + 0.3 * self._ease(t, 4.3)
 
-        # Subtle drift: tiny horizontal shift (period ~7s, amplitude ~3px)
-        dx = 3.0 * math.sin(2 * math.pi * t / 7.0)
-        dy = 2.0 * math.sin(2 * math.pi * t / 4.2)
+        # Subtle drift: tiny shifts
+        dx = 1.5 * self._ease(t, 8.0) + 0.8 * self._ease(t, 5.5)
+        dy = 1.0 * self._ease(t, 4.5)
 
-        # Build affine transform
-        M = cv2.getRotationMatrix2D((cx + dx, cy + dy), angle, 1.0)
+        # Build rotation matrix centered on image
+        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+
+        # Apply breathing as vertical scale around center
         M[1, 1] *= breath
+        M[1, 2] += (1.0 - breath) * cy  # keep center stable
+
+        # Apply drift
         M[0, 2] += dx
-        M[1, 2] += dy - (breath - 1.0) * cy
+        M[1, 2] += dy
 
         frame = cv2.warpAffine(
             self._ref, M, (w, h),

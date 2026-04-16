@@ -38,20 +38,27 @@ class MQTTHandler:
 
     def on_message(self, client, userdata, message):
         try:
-            payload = message.payload.decode("utf-8")
-            data = json.loads(payload)
+            payload = message.payload.decode("utf-8").strip()
             
-            # Check for "recognized" status as per documentation
-            if data.get("status") == "recognized":
-                text = data.get("recognized", "")
-                if text:
-                    print(f"Recognized Speech: {text}")
-                    self.callback(text)
+            # Try JSON format first (from voice recognition system)
+            try:
+                data = json.loads(payload)
+                if data.get("status") == "recognized":
+                    text = data.get("recognized", "")
+                    if text:
+                        print(f"Recognized Speech: {text}")
+                        self.callback(text)
+                        return
+            except json.JSONDecodeError:
+                pass
+            
+            # Fallback: treat as plain text (for manual testing)
+            if payload:
+                print(f"Plain text input: {payload}")
+                self.callback(payload)
                     
-        except json.JSONDecodeError:
-            print(f"Failed to decode JSON from MQTT: {payload}")
         except Exception as e:
-            print(f"Error processing message: {e}")
+            print(f"Error processing MQTT message: {e}")
 
     def start(self):
         """Start the MQTT client loop in a background thread."""
