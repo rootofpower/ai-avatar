@@ -120,11 +120,31 @@ class AvatarPipeline:
     async def feed_audio(self, pcm_24k: bytes) -> None:
         """
         Feed raw 24kHz PCM audio from Gemini into the pipeline.
-        Called by VoiceAssistant's streaming loop.
+        Audio goes two ways:
+        1. Direct to WebRTC audio track (for playback)
+        2. To splitter for inference (for lip-sync video)
         """
-        if not self._running:
+        if not self._running or not pcm_24k:
             return
+
+        # 1. Push audio directly to WebRTC for immediate playback
+        pcm_48k = self._resample_24k_to_48k(pcm_24k)
+        await self.webrtc.push_audio(pcm_48k)
+
+        # 2. Feed to splitter for video inference
         await self.splitter.feed(pcm_24k)
+
+    def _resample_24k_to_48k(self, pcm_24k: bytes) -> bytes:
+        """Resample 24kHz to 48kHz (1:2 ratio — duplicate each sample)."""
+        import struct
+        sample_count = len(pcm_24k) // 2
+        if sample_count == 0:
+            return pcm_24k
+        samples = struct.unpack(f'<{sample_count}h', pcm_24k)
+        resampled = []
+        for s in samples:
+            resampled.extend([s, s])  # 24k * 2 = 48k
+        return struct.pack(f'<{len(resampled)}h', *resampled)
 
     async def _inference_worker(self) -> None:
         """

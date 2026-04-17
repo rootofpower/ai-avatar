@@ -197,42 +197,52 @@ class AvatarVideoTrack(MediaStreamTrack):
 
 class AvatarAudioTrack(MediaStreamTrack):
     """
-    Custom audio track that pulls PCM from the AVMuxer's audio queue.
+    Custom audio track that delivers PCM audio for WebRTC.
+    Audio is fed directly via push_audio() — decoupled from video inference.
     aiortc handles Opus encoding automatically.
     """
     kind = "audio"
 
-    def __init__(self, muxer, sample_rate: int = 48000):
+    def __init__(self, sample_rate: int = 48000):
         super().__init__()
-        self._muxer = muxer
         self._sample_rate = sample_rate
         self._samples_per_frame = 960  # 20ms at 48kHz (Opus standard)
         self._pts = 0
         self._time_base = fractions.Fraction(1, sample_rate)
-        self._audio_buffer = bytearray()
+        self._buffer = bytearray()
+        self._lock = asyncio.Lock()
+        self._has_audio = asyncio.Event()
+
+    async def push_audio(self, pcm_48k: bytes) -> None:
+        """Push resampled 48kHz PCM audio into the buffer."""
+        async with self._lock:
+            self._buffer.extend(pcm_48k)
+        self._has_audio.set()
 
     async def recv(self) -> AudioFrame:
-        """Return the next audio frame (20ms Opus frame) for WebRTC."""
-        needed_bytes = self._samples_per_frame * 2  # 16-bit = 2 bytes/sample
+        """Return the next 20ms audio frame for WebRTC."""
+        needed_bytes = self._samples_per_frame * 2  # 16-bit
 
-        # Fill buffer from muxer
-        while len(self._audio_buffer) < needed_bytes:
-            try:
-                entry = await asyncio.wait_for(
-                    self._muxer.audio_queue.get(), timeout=0.05
-                )
-                self._audio_buffer.extend(entry['pcm_48k'])
-            except (asyncio.TimeoutError, Exception):
-                # Fill with silence if no audio available
-                silence = b'\x00' * (needed_bytes - len(self._audio_buffer))
-                self._audio_buffer.extend(silence)
-                break
+        # Wait briefly for audio data
+        try:
+            await asyncio.wait_for(self._has_audio.wait(), timeout=0.02)
+        except asyncio.TimeoutError:
+            pass
 
-        # Extract one frame worth of samples
-        frame_bytes = bytes(self._audio_buffer[:needed_bytes])
-        del self._audio_buffer[:needed_bytes]
+        async with self._lock:
+            if len(self._buffer) >= needed_bytes:
+                frame_bytes = bytes(self._buffer[:needed_bytes])
+                del self._buffer[:needed_bytes]
+                if len(self._buffer) == 0:
+                    self._has_audio.clear()
+            else:
+                # Not enough audio — pad with silence
+                available = bytes(self._buffer)
+                self._buffer.clear()
+                self._has_audio.clear()
+                frame_bytes = available + b'\x00' * (needed_bytes - len(available))
 
-        # Convert to av.AudioFrame
+        # Build AudioFrame
         samples = struct.unpack(f'<{self._samples_per_frame}h', frame_bytes)
         audio_array = np.array(samples, dtype=np.int16).reshape(1, -1)
 
@@ -256,6 +266,7 @@ class WebRTCServer:
         self._pcs: set = set()
         self._reference_image: Optional[np.ndarray] = None
         self._driving_video: Optional[str] = None
+        self._audio_tracks: list = []  # active audio tracks for pushing audio
         self.app = self._create_app()
 
     def set_reference_image(self, image: np.ndarray) -> None:
@@ -265,6 +276,11 @@ class WebRTCServer:
     def set_driving_video(self, video_path: str) -> None:
         """Set the driving video for idle animation."""
         self._driving_video = video_path
+
+    async def push_audio(self, pcm_48k: bytes) -> None:
+        """Push audio to all connected audio tracks."""
+        for track in self._audio_tracks:
+            await track.push_audio(pcm_48k)
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="Avatar WebRTC Server")
@@ -312,9 +328,11 @@ class WebRTCServer:
             @pc.on("connectionstatechange")
             async def on_connectionstatechange():
                 print(f"[WebRTC] Connection state: {pc.connectionState}")
-                if pc.connectionState == "failed" or pc.connectionState == "closed":
+                if pc.connectionState in ("failed", "closed"):
                     await pc.close()
                     self._pcs.discard(pc)
+                    if audio_track in self._audio_tracks:
+                        self._audio_tracks.remove(audio_track)
 
             # Add avatar media tracks
             video_track = AvatarVideoTrack(
@@ -322,7 +340,8 @@ class WebRTCServer:
                 reference_image=self._reference_image,
                 driving_video=self._driving_video,
             )
-            audio_track = AvatarAudioTrack(self._muxer)
+            audio_track = AvatarAudioTrack()
+            self._audio_tracks.append(audio_track)
             pc.addTrack(video_track)
             pc.addTrack(audio_track)
 
