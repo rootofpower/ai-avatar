@@ -23,8 +23,8 @@ class AVMuxer:
         self._source_audio_rate = source_audio_rate
 
         # Output queues for WebRTC tracks
-        self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=30)
-        self.audio_queue: asyncio.Queue = asyncio.Queue(maxsize=60)
+        self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=250)
+        self.audio_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 
     async def submit_frame(self, frame_bgr: np.ndarray, pts: float) -> None:
         """
@@ -47,7 +47,7 @@ class AVMuxer:
             self.video_queue.put_nowait(video_entry)
 
         # Retrieve matching audio from delay buffer
-        audio_pcm = await self._delay_buffer.read(pts, tolerance=0.05)
+        audio_pcm = await self._delay_buffer.read(pts, tolerance=0.5)
 
         if audio_pcm is None:
             # No matching audio — generate silence for this frame duration

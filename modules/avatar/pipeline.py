@@ -157,6 +157,9 @@ class AvatarPipeline:
 
                 if frame is not None:
                     t_elapsed = (time.monotonic() - t_start) * 1000
+                    q_depth = self.splitter.inference_queue.qsize()
+                    if q_depth > 5 or t_elapsed > 200:
+                        print(f"[Pipeline] Inference: {t_elapsed:.0f}ms, queue: {q_depth}")
                     # Submit to muxer
                     await self.muxer.submit_frame(frame, chunk['pts'])
 

@@ -23,8 +23,8 @@ class AudioSplitter:
     STALE_THRESHOLD_MS = 1000
 
     def __init__(self):
-        self.inference_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
-        self.transport_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self.inference_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self.transport_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 
         self._accumulator = bytearray()
         self._samples_processed = 0

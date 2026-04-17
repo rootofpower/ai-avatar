@@ -14,7 +14,7 @@ class AudioDelayBuffer:
     Read path: get(pts) returns audio segment matching a specific PTS.
     """
 
-    STALE_THRESHOLD_S = 1.0  # Purge segments older than 1s without matching video
+    STALE_THRESHOLD_S = 30.0  # Keep segments longer — inference may lag behind
     COLD_START_SILENCE_MS = 500  # Silence padding during cold start
 
     def __init__(self, sample_rate: int = 16000, sample_width: int = 2):
