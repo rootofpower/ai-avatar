@@ -162,9 +162,13 @@ class AvatarVideoTrack(MediaStreamTrack):
 
     async def recv(self) -> VideoFrame:
         """Return the next video frame for WebRTC transmission."""
+        # Pace frames at target FPS
+        await asyncio.sleep(self._frame_duration)
+
+        # Try to get a generated frame (non-blocking-ish)
         try:
             entry = await asyncio.wait_for(
-                self._muxer.video_queue.get(), timeout=self._frame_duration * 2
+                self._muxer.video_queue.get(), timeout=0.005
             )
             frame_bgr = entry['frame']
             self._last_speech_frame = frame_bgr
@@ -199,9 +203,14 @@ class AvatarAudioTrack(MediaStreamTrack):
     """
     Custom audio track that delivers PCM audio for WebRTC.
     Audio is fed directly via push_audio() — decoupled from video inference.
-    aiortc handles Opus encoding automatically.
+
+    Includes a pre-buffer delay (PREBUFFER_MS) to let video inference
+    produce initial frames before audio playback starts. This prevents
+    the abrupt idle→speech transition and improves lip sync.
     """
     kind = "audio"
+
+    PREBUFFER_MS = 600  # accumulate this much audio before starting playback
 
     def __init__(self, sample_rate: int = 48000):
         super().__init__()
@@ -211,41 +220,52 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._time_base = fractions.Fraction(1, sample_rate)
         self._buffer = bytearray()
         self._lock = asyncio.Lock()
-        self._has_audio = asyncio.Event()
+        self._playback_started = False
+        self._prebuffer_bytes = int(sample_rate * self.PREBUFFER_MS / 1000) * 2
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push resampled 48kHz PCM audio into the buffer."""
         async with self._lock:
             self._buffer.extend(pcm_48k)
-        self._has_audio.set()
+
+    def reset(self) -> None:
+        """Reset for a new conversation turn."""
+        self._buffer.clear()
+        self._playback_started = False
 
     async def recv(self) -> AudioFrame:
         """Return the next 20ms audio frame for WebRTC."""
         needed_bytes = self._samples_per_frame * 2  # 16-bit
 
-        # Wait briefly for audio data
-        try:
-            await asyncio.wait_for(self._has_audio.wait(), timeout=0.02)
-        except asyncio.TimeoutError:
-            pass
-
         async with self._lock:
-            if len(self._buffer) >= needed_bytes:
+            buf_len = len(self._buffer)
+
+            # Pre-buffer: wait until we have enough audio before starting
+            if not self._playback_started:
+                if buf_len >= self._prebuffer_bytes:
+                    self._playback_started = True
+                else:
+                    # Return silence while buffering
+                    frame_bytes = b'\x00' * needed_bytes
+                    return self._make_frame(frame_bytes)
+
+            # Normal playback
+            if buf_len >= needed_bytes:
                 frame_bytes = bytes(self._buffer[:needed_bytes])
                 del self._buffer[:needed_bytes]
-                if len(self._buffer) == 0:
-                    self._has_audio.clear()
             else:
-                # Not enough audio — pad with silence
+                # Buffer exhausted — end of speech
                 available = bytes(self._buffer)
                 self._buffer.clear()
-                self._has_audio.clear()
+                self._playback_started = False
                 frame_bytes = available + b'\x00' * (needed_bytes - len(available))
 
-        # Build AudioFrame
+        return self._make_frame(frame_bytes)
+
+    def _make_frame(self, frame_bytes: bytes) -> AudioFrame:
+        """Build an AudioFrame from raw PCM bytes."""
         samples = struct.unpack(f'<{self._samples_per_frame}h', frame_bytes)
         audio_array = np.array(samples, dtype=np.int16).reshape(1, -1)
-
         frame = AudioFrame.from_ndarray(audio_array, format='s16', layout='mono')
         frame.sample_rate = self._sample_rate
         frame.pts = self._pts
