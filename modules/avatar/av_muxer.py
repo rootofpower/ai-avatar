@@ -26,47 +26,64 @@ class AVMuxer:
         self.video_queue: asyncio.Queue = asyncio.Queue(maxsize=250)
         self.audio_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 
-    async def submit_frame(self, frame_bgr: np.ndarray, pts: float) -> None:
+    async def submit_frame(self, frame_bgr: np.ndarray, pts: float,
+                           chunk_duration_ms: int = 200) -> None:
         """
         Submit a generated video frame with its PTS.
-        Retrieves matching audio from delay buffer and pushes both to output queues.
+        Duplicates the frame to fill the chunk duration at target FPS,
+        and splits audio into matching segments.
 
         Args:
-            frame_bgr: BGR numpy array (full-resolution composited frame)
+            frame_bgr: BGR numpy array (lip-synced frame)
             pts: presentation timestamp matching the audio chunk
+            chunk_duration_ms: duration of the source audio chunk in ms
         """
-        # Push video frame
-        video_entry = {'frame': frame_bgr, 'pts': pts}
-        try:
-            self.video_queue.put_nowait(video_entry)
-        except asyncio.QueueFull:
-            try:
-                self.video_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            self.video_queue.put_nowait(video_entry)
+        fps = 25
+        frame_duration_ms = 1000 / fps  # 40ms
+        num_video_frames = max(1, int(chunk_duration_ms / frame_duration_ms))  # 5
 
         # Retrieve matching audio from delay buffer
         audio_pcm = await self._delay_buffer.read(pts, tolerance=0.5)
 
         if audio_pcm is None:
-            # No matching audio — generate silence for this frame duration
-            frame_duration_ms = 40  # ~25fps
-            samples_16k = int(self._source_audio_rate * frame_duration_ms / 1000)
+            # No matching audio — generate silence for the chunk
+            samples_16k = int(self._source_audio_rate * chunk_duration_ms / 1000)
             audio_pcm = b'\x00' * (samples_16k * 2)
 
-        # Resample 16kHz → 48kHz for WebRTC Opus
+        # Resample full chunk 16kHz → 48kHz
         audio_48k = self._resample_16k_to_48k(audio_pcm)
 
-        audio_entry = {'pcm_48k': audio_48k, 'pts': pts}
-        try:
-            self.audio_queue.put_nowait(audio_entry)
-        except asyncio.QueueFull:
+        # Split audio evenly across the video frames
+        audio_bytes_per_frame = len(audio_48k) // num_video_frames
+
+        for i in range(num_video_frames):
+            frame_pts = pts + (i * frame_duration_ms / 1000.0)
+
+            # Push duplicated video frame
+            video_entry = {'frame': frame_bgr, 'pts': frame_pts}
             try:
-                self.audio_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            self.audio_queue.put_nowait(audio_entry)
+                self.video_queue.put_nowait(video_entry)
+            except asyncio.QueueFull:
+                try:
+                    self.video_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self.video_queue.put_nowait(video_entry)
+
+            # Push matching audio slice
+            audio_start = i * audio_bytes_per_frame
+            audio_end = audio_start + audio_bytes_per_frame
+            audio_slice = audio_48k[audio_start:audio_end]
+
+            audio_entry = {'pcm_48k': audio_slice, 'pts': frame_pts}
+            try:
+                self.audio_queue.put_nowait(audio_entry)
+            except asyncio.QueueFull:
+                try:
+                    self.audio_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self.audio_queue.put_nowait(audio_entry)
 
     def _resample_16k_to_48k(self, pcm_16k: bytes) -> bytes:
         """

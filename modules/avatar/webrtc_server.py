@@ -148,6 +148,9 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._time_base = fractions.Fraction(1, fps)
         self._frame_duration = 1.0 / fps
         self._idle = IdleAnimator(reference_image, fps)
+        self._last_speech_frame: Optional[np.ndarray] = None
+        self._last_speech_time: float = 0
+        self._speech_holdoff: float = 0.5  # hold last frame for 0.5s after speech ends
         if driving_video:
             self._idle.set_driving_video(driving_video)
 
@@ -164,17 +167,26 @@ class AvatarVideoTrack(MediaStreamTrack):
                 self._muxer.video_queue.get(), timeout=self._frame_duration * 2
             )
             frame_bgr = entry['frame']
+            self._last_speech_frame = frame_bgr
+            self._last_speech_time = _time.monotonic()
             frame_rgb = frame_bgr[:, :, ::-1].copy()
             frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
         except (asyncio.TimeoutError, Exception):
-            # No pipeline frame — use idle animation
-            idle_frame = self._idle.generate()
-            if idle_frame is not None:
-                frame_rgb = idle_frame[:, :, ::-1].copy()
+            # Hold last speech frame briefly before returning to idle
+            if (self._last_speech_frame is not None and
+                    _time.monotonic() - self._last_speech_time < self._speech_holdoff):
+                frame_rgb = self._last_speech_frame[:, :, ::-1].copy()
                 frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
             else:
-                black = np.zeros((512, 512, 3), dtype=np.uint8)
-                frame = VideoFrame.from_ndarray(black, format='rgb24')
+                self._last_speech_frame = None
+                # Use idle animation
+                idle_frame = self._idle.generate()
+                if idle_frame is not None:
+                    frame_rgb = idle_frame[:, :, ::-1].copy()
+                    frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
+                else:
+                    black = np.zeros((512, 512, 3), dtype=np.uint8)
+                    frame = VideoFrame.from_ndarray(black, format='rgb24')
 
         frame.pts = self._pts
         frame.time_base = self._time_base
