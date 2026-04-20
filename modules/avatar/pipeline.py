@@ -231,6 +231,12 @@ class AvatarPipeline:
     def reset_for_new_turn(self) -> None:
         """Reset buffers for a new conversation turn (keep models loaded)."""
         self.splitter.reset()
+        for q in (self.muxer.video_queue, self.muxer.audio_queue):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
     @property
     def is_active(self) -> bool:

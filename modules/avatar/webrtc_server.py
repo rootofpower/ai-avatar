@@ -140,7 +140,7 @@ class AvatarVideoTrack(MediaStreamTrack):
     kind = "video"
 
     def __init__(self, muxer, fps: int = 25, reference_image: Optional[np.ndarray] = None,
-                 driving_video: Optional[str] = None):
+                 driving_video: Optional[str] = None, audio_track=None):
         super().__init__()
         self._muxer = muxer
         self._fps = fps
@@ -151,6 +151,11 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._last_speech_frame: Optional[np.ndarray] = None
         self._last_speech_time: float = 0
         self._speech_holdoff: float = 0.5  # hold last frame for 0.5s after speech ends
+        self._next_pts_time: Optional[float] = None
+        self._audio_track = audio_track
+        self._current_speech_frame: Optional[np.ndarray] = None
+        self._current_speech_pts: float = -1.0
+
         if driving_video:
             self._idle.set_driving_video(driving_video)
 
@@ -162,20 +167,59 @@ class AvatarVideoTrack(MediaStreamTrack):
 
     async def recv(self) -> VideoFrame:
         """Return the next video frame for WebRTC transmission."""
-        # Pace frames at target FPS
-        await asyncio.sleep(self._frame_duration)
+        
+        # --- Pacing logic to prevent drift ---
+        if self._next_pts_time is None:
+            self._next_pts_time = _time.monotonic()
+            
+        now = _time.monotonic()
+        wait_time = self._next_pts_time - now
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        elif wait_time < -0.1:
+            self._next_pts_time = now
+            
+        self._next_pts_time += self._frame_duration
+        # -------------------------------------
 
-        # Try to get a generated frame (non-blocking-ish)
-        try:
-            entry = await asyncio.wait_for(
-                self._muxer.video_queue.get(), timeout=0.005
-            )
-            frame_bgr = entry['frame']
-            self._last_speech_frame = frame_bgr
-            self._last_speech_time = _time.monotonic()
+        frame_bgr = None
+        target_pts = 0.0
+        
+        if self._audio_track is not None:
+            target_pts = self._audio_track.speech_time
+            
+            if target_pts > 0:
+                # Audio is playing, try to catch up with video
+                try:
+                    while True:
+                        if self._current_speech_pts < target_pts:
+                            entry = self._muxer.video_queue.get_nowait()
+                            self._current_speech_frame = entry['frame']
+                            self._current_speech_pts = entry['pts']
+                            self._last_speech_time = _time.monotonic()
+                        else:
+                            break
+                except asyncio.QueueEmpty:
+                    pass
+                
+                frame_bgr = self._current_speech_frame
+            else:
+                self._current_speech_pts = -1.0
+                self._current_speech_frame = None
+
+        else:
+            # Fallback if audio_track not provided (should not happen)
+            try:
+                entry = self._muxer.video_queue.get_nowait()
+                frame_bgr = entry['frame']
+                self._last_speech_time = _time.monotonic()
+            except asyncio.QueueEmpty:
+                pass
+
+        if frame_bgr is not None:
             frame_rgb = frame_bgr[:, :, ::-1].copy()
             frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
-        except (asyncio.TimeoutError, Exception):
+        else:
             # Hold last speech frame briefly before returning to idle
             if (self._last_speech_frame is not None and
                     _time.monotonic() - self._last_speech_time < self._speech_holdoff):
@@ -223,6 +267,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._playback_started = False
         self._prebuffer_bytes = int(sample_rate * self.PREBUFFER_MS / 1000) * 2
         self._next_pts_time: Optional[float] = None
+        self.speech_time: float = 0.0
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push resampled 48kHz PCM audio into the buffer."""
@@ -234,6 +279,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._buffer.clear()
         self._playback_started = False
         self._next_pts_time = None
+        self.speech_time = 0.0
 
     async def recv(self) -> AudioFrame:
         """Return the next 20ms audio frame for WebRTC."""
@@ -264,6 +310,7 @@ class AvatarAudioTrack(MediaStreamTrack):
             if not self._playback_started:
                 if buf_len >= self._prebuffer_bytes:
                     self._playback_started = True
+                    self.speech_time = 0.0
                 else:
                     # Return silence while buffering
                     frame_bytes = b'\x00' * needed_bytes
@@ -273,12 +320,14 @@ class AvatarAudioTrack(MediaStreamTrack):
             if buf_len >= needed_bytes:
                 frame_bytes = bytes(self._buffer[:needed_bytes])
                 del self._buffer[:needed_bytes]
+                self.speech_time += (self._samples_per_frame / self._sample_rate)
             else:
                 # Buffer exhausted — end of speech
                 available = bytes(self._buffer)
                 self._buffer.clear()
                 self._playback_started = False
                 frame_bytes = available + b'\x00' * (needed_bytes - len(available))
+                self.speech_time += (len(available) / 2 / self._sample_rate)
 
         return self._make_frame(frame_bytes)
 
@@ -374,14 +423,16 @@ class WebRTCServer:
                     if audio_track in self._audio_tracks:
                         self._audio_tracks.remove(audio_track)
 
+            audio_track = AvatarAudioTrack()
+            self._audio_tracks.append(audio_track)
+
             # Add avatar media tracks
             video_track = AvatarVideoTrack(
                 self._muxer,
                 reference_image=self._reference_image,
                 driving_video=self._driving_video,
+                audio_track=audio_track,
             )
-            audio_track = AvatarAudioTrack()
-            self._audio_tracks.append(audio_track)
             pc.addTrack(video_track)
             pc.addTrack(audio_track)
 
