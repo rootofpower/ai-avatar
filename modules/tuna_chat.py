@@ -1,4 +1,5 @@
 
+import asyncio
 import aiohttp
 import os
 import logging
@@ -8,11 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Logging Setup ---
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("tuna_chat")
+logger.setLevel(logging.INFO)
 
 TUNA_API_BASE_URL = os.getenv("TUNA_API_URL", "http://localhost")
 
@@ -44,7 +42,7 @@ class TunaChatAPI:
                 async with session.post(
                     self.chat_endpoint,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=120),
+                    timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     logger.info("Response received | status=%s, content_type=%s", resp.status, resp.content_type)
                     logger.debug("Response headers: %s", dict(resp.headers))
