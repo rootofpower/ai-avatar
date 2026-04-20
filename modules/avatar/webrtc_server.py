@@ -222,6 +222,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._lock = asyncio.Lock()
         self._playback_started = False
         self._prebuffer_bytes = int(sample_rate * self.PREBUFFER_MS / 1000) * 2
+        self._next_pts_time: Optional[float] = None
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push resampled 48kHz PCM audio into the buffer."""
@@ -232,9 +233,28 @@ class AvatarAudioTrack(MediaStreamTrack):
         """Reset for a new conversation turn."""
         self._buffer.clear()
         self._playback_started = False
+        self._next_pts_time = None
 
     async def recv(self) -> AudioFrame:
         """Return the next 20ms audio frame for WebRTC."""
+        
+        # --- Pacing logic to prevent buffer dumps ---
+        if self._next_pts_time is None:
+            self._next_pts_time = _time.monotonic()
+            
+        now = _time.monotonic()
+        wait_time = self._next_pts_time - now
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        elif wait_time < -0.1:
+            # If we fall too far behind (e.g. CPU stall), reset the clock 
+            # to prevent a sudden burst of packets.
+            self._next_pts_time = now
+            
+        # Advance clock by exactly 20ms
+        self._next_pts_time += (self._samples_per_frame / self._sample_rate)
+        # --------------------------------------------
+
         needed_bytes = self._samples_per_frame * 2  # 16-bit
 
         async with self._lock:
