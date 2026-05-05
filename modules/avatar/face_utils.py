@@ -113,16 +113,51 @@ def stitch_face(
     resized_face = cv2.resize(generated_face, (face_w, face_h), interpolation=cv2.INTER_LANCZOS4)
 
     if mask_array is not None and crop_box is not None:
-        # Use pre-computed mask (MuseTalk V1.5 blending)
+        ih, iw = original_frame.shape[:2]
+
+        # Clamp crop_box to image bounds
+        x_s, y_s, x_e, y_e = crop_box
+        x_s_c = max(0, x_s)
+        y_s_c = max(0, y_s)
+        x_e_c = min(iw, x_e)
+        y_e_c = min(ih, y_e)
+
+        if x_e_c <= x_s_c or y_e_c <= y_s_c:
+            # Fallback: just paste directly
+            result = original_frame.copy()
+            result[max(0,y1):min(ih,y2), max(0,x1):min(iw,x2)] = resized_face[
+                max(0,-y1):face_h-max(0,y2-ih),
+                max(0,-x1):face_w-max(0,x2-iw)
+            ]
+            return result
+
         body = Image.fromarray(original_frame[:, :, ::-1])  # BGR to RGB
         face_img = Image.fromarray(resized_face[:, :, ::-1])
 
-        x_s, y_s, x_e, y_e = crop_box
-        face_large = body.crop(crop_box)
+        # Crop body region (clamped)
+        face_large = body.crop((x_s_c, y_s_c, x_e_c, y_e_c))
 
-        mask_image = Image.fromarray(mask_array).convert("L")
-        face_large.paste(face_img, (x1 - x_s, y1 - y_s, x2 - x_s, y2 - y_s))
-        body.paste(face_large, crop_box[:2], mask_image)
+        # Paste position of face inside the clamped crop
+        paste_x1 = x1 - x_s_c
+        paste_y1 = y1 - y_s_c
+        paste_x2 = paste_x1 + face_w
+        paste_y2 = paste_y1 + face_h
+
+        # Resize mask to match clamped crop size
+        crop_w = x_e_c - x_s_c
+        crop_h = y_e_c - y_s_c
+        mask_resized = cv2.resize(mask_array, (crop_w, crop_h), interpolation=cv2.INTER_LINEAR)
+        mask_image = Image.fromarray(mask_resized).convert("L")
+
+        # Clamp paste box to crop region
+        paste_x1 = max(0, paste_x1)
+        paste_y1 = max(0, paste_y1)
+        paste_x2 = min(crop_w, paste_x2)
+        paste_y2 = min(crop_h, paste_y2)
+        face_clipped = face_img.crop((0, 0, paste_x2 - paste_x1, paste_y2 - paste_y1))
+
+        face_large.paste(face_clipped, (paste_x1, paste_y1))
+        body.paste(face_large, (x_s_c, y_s_c), mask_image)
 
         return np.array(body)[:, :, ::-1]  # RGB back to BGR
     else:
