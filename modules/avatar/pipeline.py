@@ -10,6 +10,7 @@ from modules.avatar.visual_frame_generator import VisualFrameGenerator
 from modules.avatar.video_encoder import VideoEncoder
 from modules.avatar.av_muxer import AVMuxer
 from modules.avatar.webrtc_server import WebRTCServer
+from modules.avatar.style_filter import StyleFilter
 
 
 class AvatarPipeline:
@@ -66,6 +67,7 @@ class AvatarPipeline:
             turn_username=turn_username,
             turn_password=turn_password,
         )
+        self.style_filter = StyleFilter()
 
         self._inference_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
@@ -187,6 +189,10 @@ class AvatarPipeline:
                 # Visual Frame Generation (MuseTalk)
                 frame = self.vfg.generate_frame(audio_prompt)
 
+                # Apply cyberpunk style filter
+                if frame is not None:
+                    frame = self.style_filter.apply(frame)
+
                 if frame is not None:
                     t_elapsed = (time.monotonic() - t_start) * 1000
                     q_depth = self.splitter.inference_queue.qsize()
@@ -243,12 +249,22 @@ class AvatarPipeline:
     def reset_for_new_turn(self) -> None:
         """Reset buffers for a new conversation turn (keep models loaded)."""
         self.splitter.reset()
+        # Reset delay buffer synchronously-safe
+        self.delay_buffer._buffer.clear()
+        self.delay_buffer._first_write_time = None
+        # Drain muxer queues
         for q in (self.muxer.video_queue, self.muxer.audio_queue):
             while not q.empty():
                 try:
                     q.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+        # Reset all connected WebRTC audio tracks
+        for track in self.webrtc._audio_tracks:
+            track.reset()
+        # Reset all connected WebRTC video tracks
+        for track in self.webrtc._video_tracks:
+            track.reset()
 
     @property
     def is_active(self) -> bool:

@@ -13,6 +13,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from modules.avatar.style_filter import StyleFilter
+
 
 import cv2
 import math
@@ -140,7 +142,7 @@ class AvatarVideoTrack(MediaStreamTrack):
     kind = "video"
 
     def __init__(self, muxer, fps: int = 25, reference_image: Optional[np.ndarray] = None,
-                 driving_video: Optional[str] = None, audio_track=None):
+                 driving_video: Optional[str] = None, audio_track=None, style_filter: Optional[StyleFilter] = None):
         super().__init__()
         self._muxer = muxer
         self._fps = fps
@@ -155,9 +157,17 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._audio_track = audio_track
         self._current_speech_frame: Optional[np.ndarray] = None
         self._current_speech_pts: float = -1.0
+        self._style_filter = style_filter
 
         if driving_video:
             self._idle.set_driving_video(driving_video)
+
+    def reset(self) -> None:
+        """Reset speech state for a new conversation turn."""
+        self._current_speech_frame = None
+        self._current_speech_pts = -1.0
+        self._last_speech_frame = None
+        self._last_speech_time = 0
 
     def set_reference_image(self, image: np.ndarray) -> None:
         self._idle.set_reference(image)
@@ -230,6 +240,9 @@ class AvatarVideoTrack(MediaStreamTrack):
                 # Use idle animation
                 idle_frame = self._idle.generate()
                 if idle_frame is not None:
+                    # Apply style filter to idle frames too
+                    if self._style_filter is not None:
+                        idle_frame = self._style_filter.apply(idle_frame)
                     frame_rgb = idle_frame[:, :, ::-1].copy()
                     frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
                 else:
@@ -361,6 +374,8 @@ class WebRTCServer:
         self._reference_image: Optional[np.ndarray] = None
         self._driving_video: Optional[str] = None
         self._audio_tracks: list = []  # active audio tracks for pushing audio
+        self._video_tracks: list = []  # active video tracks for reset
+        self._style_filter = StyleFilter()
 
         # Build ICE servers list
         self._ice_servers = [RTCIceServer(urls=[stun_server])]
@@ -475,6 +490,8 @@ class WebRTCServer:
                     self._pcs.discard(pc)
                     if audio_track in self._audio_tracks:
                         self._audio_tracks.remove(audio_track)
+                    if video_track in self._video_tracks:
+                        self._video_tracks.remove(video_track)
 
             @pc.on("iceconnectionstatechange")
             async def on_iceconnectionstatechange():
@@ -493,9 +510,11 @@ class WebRTCServer:
                 reference_image=self._reference_image,
                 driving_video=self._driving_video,
                 audio_track=audio_track,
+                style_filter=self._style_filter,
             )
             pc.addTrack(video_track)
             pc.addTrack(audio_track)
+            self._video_tracks.append(video_track)
             print(f"[WebRTC] Added video + audio tracks")
 
             await pc.setRemoteDescription(offer_sdp)
