@@ -34,17 +34,19 @@ async function connect() {
 
         // Handle incoming media tracks
         pc.ontrack = (event) => {
-            console.log('Track received:', event.track.kind);
+            console.log('[WebRTC] Track received:', event.track.kind, event.track.id);
+            console.log('[WebRTC] Streams:', event.streams.length);
             if (event.track.kind === 'video') {
                 videoEl.srcObject = event.streams[0];
                 videoEl.muted = false;
+                console.log('[WebRTC] Video element srcObject set');
             }
             // Audio track is part of the same stream — browser plays it automatically
         };
 
         // Monitor connection state
         pc.onconnectionstatechange = () => {
-            console.log('Connection state:', pc.connectionState);
+            console.log('[WebRTC] Connection state:', pc.connectionState);
             switch (pc.connectionState) {
                 case 'connected':
                     setStatus('connected', 'Connected');
@@ -53,7 +55,7 @@ async function connect() {
                     break;
                 case 'disconnected':
                 case 'failed':
-                    setStatus('error', 'Disconnected');
+                    setStatus('error', pc.connectionState === 'failed' ? 'Connection Failed' : 'Disconnected');
                     cleanup();
                     break;
                 case 'closed':
@@ -64,7 +66,23 @@ async function connect() {
         };
 
         pc.oniceconnectionstatechange = () => {
-            console.log('ICE state:', pc.iceConnectionState);
+            console.log('[WebRTC] ICE connection state:', pc.iceConnectionState);
+        };
+
+        pc.onicegatheringstatechange = () => {
+            console.log('[WebRTC] ICE gathering state:', pc.iceGatheringState);
+        };
+
+        pc.onsignalingstatechange = () => {
+            console.log('[WebRTC] Signaling state:', pc.signalingState);
+        };
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                console.log('[WebRTC] Local ICE candidate:', event.candidate.type, event.candidate.address, event.candidate.port, event.candidate.protocol);
+            } else {
+                console.log('[WebRTC] ICE candidate gathering done (null candidate)');
+            }
         };
 
         // We need to add transceivers to receive media
@@ -74,23 +92,33 @@ async function connect() {
         // Create offer
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        console.log('[WebRTC] Local description set, gathering ICE candidates...');
 
         // Wait for ICE gathering to complete (or timeout)
         await new Promise((resolve) => {
             if (pc.iceGatheringState === 'complete') {
+                console.log('[WebRTC] ICE gathering already complete');
                 resolve();
             } else {
                 const checkState = () => {
                     if (pc.iceGatheringState === 'complete') {
                         pc.removeEventListener('icegatheringstatechange', checkState);
+                        console.log('[WebRTC] ICE gathering completed');
                         resolve();
                     }
                 };
                 pc.addEventListener('icegatheringstatechange', checkState);
-                // Timeout after 3s
-                setTimeout(resolve, 3000);
+                // Timeout after 5s
+                setTimeout(() => {
+                    console.warn('[WebRTC] ICE gathering timed out after 5s');
+                    resolve();
+                }, 5000);
             }
         });
+
+        // Count ICE candidates in the offer
+        const candidateCount = (pc.localDescription.sdp.match(/a=candidate:/g) || []).length;
+        console.log(`[WebRTC] Sending offer with ${candidateCount} ICE candidates`);
 
         // Send offer to signaling server
         const response = await fetch('/offer', {
@@ -103,15 +131,19 @@ async function connect() {
         });
 
         if (!response.ok) {
-            throw new Error(`Signaling failed: ${response.status}`);
+            const errText = await response.text();
+            throw new Error(`Signaling failed: ${response.status} - ${errText}`);
         }
 
         const answer = await response.json();
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        const answerCandidates = (answer.sdp.match(/a=candidate:/g) || []).length;
+        console.log(`[WebRTC] Received answer with ${answerCandidates} ICE candidates`);
 
-        console.log('WebRTC connection established');
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        console.log('[WebRTC] Remote description set, waiting for connection...');
+
     } catch (err) {
-        console.error('Connection failed:', err);
+        console.error('[WebRTC] Connection failed:', err);
         setStatus('error', 'Connection failed');
         cleanup();
     }

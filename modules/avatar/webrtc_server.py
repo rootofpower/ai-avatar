@@ -407,12 +407,14 @@ class WebRTCServer:
         async def offer(request: Request):
             """Handle WebRTC SDP offer from client."""
             params = await request.json()
+            print(f"[WebRTC] Received offer from client (type={params['type']})")
             offer_sdp = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
             pc = RTCPeerConnection(configuration=RTCConfiguration(
                 iceServers=[RTCIceServer(urls=[self._stun_server])]
             ))
             self._pcs.add(pc)
+            print(f"[WebRTC] Created PeerConnection (STUN: {self._stun_server})")
 
             @pc.on("connectionstatechange")
             async def on_connectionstatechange():
@@ -422,6 +424,14 @@ class WebRTCServer:
                     self._pcs.discard(pc)
                     if audio_track in self._audio_tracks:
                         self._audio_tracks.remove(audio_track)
+
+            @pc.on("iceconnectionstatechange")
+            async def on_iceconnectionstatechange():
+                print(f"[WebRTC] ICE connection state: {pc.iceConnectionState}")
+
+            @pc.on("icegatheringstatechange")
+            async def on_icegatheringstatechange():
+                print(f"[WebRTC] ICE gathering state: {pc.iceGatheringState}")
 
             audio_track = AvatarAudioTrack()
             self._audio_tracks.append(audio_track)
@@ -435,10 +445,32 @@ class WebRTCServer:
             )
             pc.addTrack(video_track)
             pc.addTrack(audio_track)
+            print(f"[WebRTC] Added video + audio tracks")
 
             await pc.setRemoteDescription(offer_sdp)
+            print(f"[WebRTC] Remote description set")
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
+            print(f"[WebRTC] Local description set, waiting for ICE gathering...")
+
+            # Wait for ICE gathering to complete (with timeout)
+            if pc.iceGatheringState != "complete":
+                ice_done = asyncio.Event()
+
+                @pc.on("icegatheringstatechange")
+                async def on_ice_complete():
+                    if pc.iceGatheringState == "complete":
+                        ice_done.set()
+
+                try:
+                    await asyncio.wait_for(ice_done.wait(), timeout=5.0)
+                    print(f"[WebRTC] ICE gathering complete")
+                except asyncio.TimeoutError:
+                    print(f"[WebRTC] ICE gathering timed out (5s) — sending partial candidates")
+
+            sdp_answer = pc.localDescription.sdp
+            candidate_count = sdp_answer.count("a=candidate:")
+            print(f"[WebRTC] Sending answer with {candidate_count} ICE candidates")
 
             return JSONResponse({
                 "sdp": pc.localDescription.sdp,
