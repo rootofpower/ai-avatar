@@ -76,7 +76,7 @@ class StyleFilter:
         if self._scanline_opacity > 0:
             if self._scanline_cache is None or self._scanline_cache.shape[:2] != (h, w):
                 self._scanline_cache = self._make_scanlines(h, w)
-            colored = colored * (1.0 - self._scanline_cache * self._scanline_opacity)
+            colored = colored * (1.0 - self._scanline_cache[:, :, np.newaxis] * self._scanline_opacity)
 
         # Convert back to uint8 BGR
         result = (colored * 255).clip(0, 255).astype(np.uint8)
