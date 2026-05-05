@@ -25,6 +25,9 @@ AVATAR_ENABLED = os.getenv("AVATAR_ENABLED", "false").lower() == "true"
 AVATAR_IMAGE = os.getenv("AVATAR_IMAGE", "")
 AVATAR_IDLE_VIDEO = os.getenv("AVATAR_IDLE_VIDEO", "")
 WEBRTC_PORT = int(os.getenv("WEBRTC_PORT", "8080"))
+TURN_SERVER = os.getenv("TURN_SERVER", "")
+TURN_USERNAME = os.getenv("TURN_USERNAME", "")
+TURN_PASSWORD = os.getenv("TURN_PASSWORD", "")
 
 print(f"[Config] AVATAR_ENABLED={AVATAR_ENABLED}, AVATAR_IMAGE='{AVATAR_IMAGE}', AVATAR_IDLE_VIDEO='{AVATAR_IDLE_VIDEO}'")
 
@@ -85,6 +88,9 @@ class VoiceAssistant:
                 avatar_image=AVATAR_IMAGE if AVATAR_IMAGE else None,
                 idle_video=AVATAR_IDLE_VIDEO if AVATAR_IDLE_VIDEO else None,
                 webrtc_port=WEBRTC_PORT,
+                turn_server=TURN_SERVER if TURN_SERVER else None,
+                turn_username=TURN_USERNAME if TURN_USERNAME else None,
+                turn_password=TURN_PASSWORD if TURN_PASSWORD else None,
             )
             active = await self.avatar_pipeline.start()
             if active:

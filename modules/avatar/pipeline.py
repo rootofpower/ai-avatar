@@ -30,6 +30,9 @@ class AvatarPipeline:
         fps: int = 25,
         webrtc_port: int = 8080,
         stun_server: str = "stun:stun.l.google.com:19302",
+        turn_server: Optional[str] = None,
+        turn_username: Optional[str] = None,
+        turn_password: Optional[str] = None,
     ):
         self._models_dir = models_dir
         self._avatar_image = avatar_image
@@ -38,6 +41,9 @@ class AvatarPipeline:
         self._fps = fps
         self._webrtc_port = webrtc_port
         self._stun_server = stun_server
+        self._turn_server = turn_server
+        self._turn_username = turn_username
+        self._turn_password = turn_password
 
         # Pipeline components
         self.splitter = AudioSplitter()
@@ -53,7 +59,13 @@ class AvatarPipeline:
         )
         self.encoder = VideoEncoder(fps=fps)
         self.muxer = AVMuxer(self.delay_buffer)
-        self.webrtc = WebRTCServer(self.muxer, stun_server=stun_server)
+        self.webrtc = WebRTCServer(
+            self.muxer,
+            stun_server=stun_server,
+            turn_server=turn_server,
+            turn_username=turn_username,
+            turn_password=turn_password,
+        )
 
         self._inference_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None

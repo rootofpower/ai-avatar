@@ -28,9 +28,20 @@ async function connect() {
     btnConnect.disabled = true;
 
     try {
-        pc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
+        // Fetch ICE server config (STUN + TURN) from server
+        let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+        try {
+            const iceResp = await fetch('/ice-config');
+            if (iceResp.ok) {
+                const iceConfig = await iceResp.json();
+                iceServers = iceConfig.iceServers;
+                console.log('[WebRTC] ICE servers from server:', JSON.stringify(iceServers));
+            }
+        } catch (e) {
+            console.warn('[WebRTC] Failed to fetch ICE config, using STUN only:', e);
+        }
+
+        pc = new RTCPeerConnection({ iceServers });
 
         // Handle incoming media tracks
         pc.ontrack = (event) => {

@@ -349,13 +349,40 @@ class WebRTCServer:
     Serves the client HTML and handles SDP/ICE exchange.
     """
 
-    def __init__(self, muxer, stun_server: str = "stun:stun.l.google.com:19302"):
+    def __init__(self, muxer, stun_server: str = "stun:stun.l.google.com:19302",
+                 turn_server: Optional[str] = None, turn_username: Optional[str] = None,
+                 turn_password: Optional[str] = None):
         self._muxer = muxer
         self._stun_server = stun_server
+        self._turn_server = turn_server
+        self._turn_username = turn_username
+        self._turn_password = turn_password
         self._pcs: set = set()
         self._reference_image: Optional[np.ndarray] = None
         self._driving_video: Optional[str] = None
         self._audio_tracks: list = []  # active audio tracks for pushing audio
+
+        # Build ICE servers list
+        self._ice_servers = [RTCIceServer(urls=[stun_server])]
+        if turn_server and turn_username and turn_password:
+            self._ice_servers.append(RTCIceServer(
+                urls=[turn_server],
+                username=turn_username,
+                credential=turn_password,
+            ))
+            # Also add TURNS (TLS) variant on port 443
+            turns_url = turn_server.replace("turn:", "turns:", 1)
+            if ":80" in turns_url:
+                turns_url = turns_url.replace(":80", ":443")
+            self._ice_servers.append(RTCIceServer(
+                urls=[turns_url],
+                username=turn_username,
+                credential=turn_password,
+            ))
+            print(f"[WebRTC] TURN server configured: {turn_server}")
+        else:
+            print(f"[WebRTC] No TURN server configured (STUN only)")
+
         self.app = self._create_app()
 
     def set_reference_image(self, image: np.ndarray) -> None:
@@ -403,6 +430,27 @@ class WebRTCServer:
                     return Response(content=f.read(), media_type="application/javascript")
             return JSONResponse({"error": "app.js not found"}, status_code=404)
 
+        @app.get("/ice-config")
+        async def ice_config():
+            """Return ICE server configuration for the client."""
+            servers = [{"urls": self._stun_server}]
+            if self._turn_server and self._turn_username and self._turn_password:
+                servers.append({
+                    "urls": self._turn_server,
+                    "username": self._turn_username,
+                    "credential": self._turn_password,
+                })
+                # TURNS variant
+                turns_url = self._turn_server.replace("turn:", "turns:", 1)
+                if ":80" in turns_url:
+                    turns_url = turns_url.replace(":80", ":443")
+                servers.append({
+                    "urls": turns_url,
+                    "username": self._turn_username,
+                    "credential": self._turn_password,
+                })
+            return JSONResponse({"iceServers": servers})
+
         @app.post("/offer")
         async def offer(request: Request):
             """Handle WebRTC SDP offer from client."""
@@ -411,10 +459,13 @@ class WebRTCServer:
             offer_sdp = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
             pc = RTCPeerConnection(configuration=RTCConfiguration(
-                iceServers=[RTCIceServer(urls=[self._stun_server])]
+                iceServers=self._ice_servers
             ))
             self._pcs.add(pc)
-            print(f"[WebRTC] Created PeerConnection (STUN: {self._stun_server})")
+            ice_info = f"STUN: {self._stun_server}"
+            if self._turn_server:
+                ice_info += f", TURN: {self._turn_server}"
+            print(f"[WebRTC] Created PeerConnection ({ice_info})")
 
             @pc.on("connectionstatechange")
             async def on_connectionstatechange():
@@ -468,9 +519,17 @@ class WebRTCServer:
                 except asyncio.TimeoutError:
                     print(f"[WebRTC] ICE gathering timed out (5s) — sending partial candidates")
 
+            # Log offer candidates from client
+            offer_lines = [l for l in params["sdp"].split('\n') if 'a=candidate:' in l]
+            print(f"[WebRTC] Client offer has {len(offer_lines)} ICE candidates:")
+            for line in offer_lines:
+                print(f"  [OFFER] {line.strip()}")
+
             sdp_answer = pc.localDescription.sdp
-            candidate_count = sdp_answer.count("a=candidate:")
-            print(f"[WebRTC] Sending answer with {candidate_count} ICE candidates")
+            answer_lines = [l for l in sdp_answer.split('\n') if 'a=candidate:' in l]
+            print(f"[WebRTC] Sending answer with {len(answer_lines)} ICE candidates:")
+            for line in answer_lines:
+                print(f"  [ANSWER] {line.strip()}")
 
             return JSONResponse({
                 "sdp": pc.localDescription.sdp,
