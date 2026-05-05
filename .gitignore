@@ -17,13 +17,13 @@ __pycache__/
 Thumbs.db
 
 # Project specific media / models / large files
-client/static/*.vrm
 client/static/*.mp4
 *.wav
 *.mp4
 *.png
 *.jpg
 *.jpeg
+models/
 
 # If you don't want to track the PDF thesis document
 thesis-watch.pdf
