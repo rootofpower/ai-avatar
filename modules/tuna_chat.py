@@ -72,7 +72,7 @@ class TunaChatAPI:
             logger.debug("Full traceback:\n%s", traceback.format_exc())
             return None
         except asyncio.TimeoutError:
-            logger.error("Request timed out after 120s to %s", self.chat_endpoint)
+            logger.error("Request timed out after 5s to %s", self.chat_endpoint)
             return None
         except aiohttp.ClientError as e:
             logger.error("TUNA API ClientError | type=%s, detail=%s", type(e).__name__, e)

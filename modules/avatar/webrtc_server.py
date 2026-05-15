@@ -293,6 +293,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._playback_started = False
         self._next_pts_time = None
         self.speech_time = 0.0
+        print("[WebRTC] Audio track reset for new turn")
 
     async def recv(self) -> AudioFrame:
         """Return the next 20ms audio frame for WebRTC."""
@@ -306,8 +307,6 @@ class AvatarAudioTrack(MediaStreamTrack):
         if wait_time > 0:
             await asyncio.sleep(wait_time)
         elif wait_time < -0.1:
-            # If we fall too far behind (e.g. CPU stall), reset the clock 
-            # to prevent a sudden burst of packets.
             self._next_pts_time = now
             
         # Advance clock by exactly 20ms
@@ -324,6 +323,7 @@ class AvatarAudioTrack(MediaStreamTrack):
                 if buf_len >= self._prebuffer_bytes:
                     self._playback_started = True
                     self.speech_time = 0.0
+                    print(f"[WebRTC] Audio playback started (buffered {buf_len} bytes)")
                 else:
                     # Return silence while buffering
                     frame_bytes = b'\x00' * needed_bytes
@@ -340,7 +340,9 @@ class AvatarAudioTrack(MediaStreamTrack):
                 self._buffer.clear()
                 self._playback_started = False
                 frame_bytes = available + b'\x00' * (needed_bytes - len(available))
-                self.speech_time += (len(available) / 2 / self._sample_rate)
+                # Reset speech_time to 0 so video track returns to idle
+                self.speech_time = 0.0
+                print(f"[WebRTC] Audio playback ended (buffer exhausted)")
 
         return self._make_frame(frame_bytes)
 
@@ -410,6 +412,8 @@ class WebRTCServer:
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push audio to all connected audio tracks."""
+        if not self._audio_tracks:
+            return
         for track in self._audio_tracks:
             await track.push_audio(pcm_48k)
 

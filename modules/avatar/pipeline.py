@@ -165,8 +165,13 @@ class AvatarPipeline:
         Continuously pulls 200ms chunks from the inference queue,
         extracts audio features, generates video frames, and submits
         them to the muxer.
+
+        GPU inference runs in a thread executor to avoid blocking
+        the asyncio event loop (which would starve WebRTC tracks).
         """
         print("[Pipeline] Inference worker started.")
+        loop = asyncio.get_running_loop()
+
         while self._running:
             try:
                 chunk = await asyncio.wait_for(
@@ -183,15 +188,19 @@ class AvatarPipeline:
             try:
                 t_start = time.monotonic()
 
-                # Audio Feature Extraction (Whisper)
-                audio_prompt = self.afe.extract(chunk['pcm'])
-
-                # Visual Frame Generation (MuseTalk)
-                frame = self.vfg.generate_frame(audio_prompt)
+                # Run GPU-heavy work in thread to not block event loop
+                audio_prompt = await loop.run_in_executor(
+                    None, self.afe.extract, chunk['pcm']
+                )
+                frame = await loop.run_in_executor(
+                    None, self.vfg.generate_frame, audio_prompt
+                )
 
                 # Apply cyberpunk style filter
                 if frame is not None:
-                    frame = self.style_filter.apply(frame)
+                    frame = await loop.run_in_executor(
+                        None, self.style_filter.apply, frame
+                    )
 
                 if frame is not None:
                     t_elapsed = (time.monotonic() - t_start) * 1000
@@ -248,6 +257,7 @@ class AvatarPipeline:
 
     def reset_for_new_turn(self) -> None:
         """Reset buffers for a new conversation turn (keep models loaded)."""
+        print("[Pipeline] Resetting for new turn...")
         self.splitter.reset()
         # Reset delay buffer synchronously-safe
         self.delay_buffer._buffer.clear()

@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import os
+import signal
+import subprocess
 import threading
 from typing import Optional
 from modules.mqtt_handler import MQTTHandler
@@ -157,11 +159,22 @@ class VoiceAssistant:
                 audio_filename = "response_audio.wav"
                 self._save_audio(complete_audio, audio_filename)
                 print(f"Playing audio...")
-                os.system(f"aplay {audio_filename} > /dev/null 2>&1 &")
+                self._play_audio_file(audio_filename)
             else:
                 print("[Gemini] No audio received!")
             
             self.input_queue.task_done()
+
+    def _play_audio_file(self, filename: str) -> None:
+        """Play audio file in background without blocking the event loop."""
+        try:
+            subprocess.Popen(
+                ["aplay", filename],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            print("[WARN] aplay not found, skipping local playback")
 
     def _save_audio(self, audio_data: bytes, filename: str) -> None:
         """Save raw PCM audio to WAV file."""
@@ -212,7 +225,20 @@ class VoiceAssistant:
 
 if __name__ == "__main__":
     app = VoiceAssistant()
+    loop = asyncio.new_event_loop()
+    
+    def _shutdown(sig, frame):
+        print("\nShutting down...")
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+        loop.call_soon_threadsafe(loop.stop)
+    
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    
     try:
-        asyncio.run(app.run())
-    except KeyboardInterrupt:
+        loop.run_until_complete(app.run())
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
+    finally:
+        loop.close()
