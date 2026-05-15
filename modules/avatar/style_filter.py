@@ -34,18 +34,35 @@ class StyleFilter:
         self._person_mask_cache: Optional[np.ndarray] = None
         self._person_mask_shape: Optional[Tuple[int, int]] = None
 
-        # Setup Mediapipe Selfie Segmentation if available
+        # Setup Mediapipe Tasks ImageSegmenter if available
         self._segmenter = None
+        self._mp = None
         if self._remove_bg:
             try:
                 import mediapipe as mp
-                # Using general model (0) for better quality, landscape (1) is faster
-                self._segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=0)
-                print("[StyleFilter] Successfully loaded Mediapipe Selfie Segmentation.")
-            except ImportError:
-                print("[StyleFilter] WARNING: Mediapipe not installed. Background removal will use Haar Cascade fallback. Run `pip install mediapipe` for perfect background removal.")
-            except AttributeError:
-                print("[StyleFilter] WARNING: Incompatible Mediapipe version. Background removal will use Haar Cascade fallback.")
+                from mediapipe.tasks import python as mp_python
+                from mediapipe.tasks.python import vision
+                import urllib.request
+                import os
+                
+                model_path = os.path.join(os.path.dirname(__file__), "selfie_segmenter.tflite")
+                if not os.path.exists(model_path):
+                    print("[StyleFilter] Downloading selfie_segmenter.tflite...")
+                    url = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite"
+                    urllib.request.urlretrieve(url, model_path)
+                
+                base_options = mp_python.BaseOptions(model_asset_path=model_path)
+                options = vision.ImageSegmenterOptions(
+                    base_options=base_options,
+                    output_category_mask=True
+                )
+                self._segmenter = vision.ImageSegmenter.create_from_options(options)
+                self._mp = mp
+                print("[StyleFilter] Successfully loaded Mediapipe Tasks ImageSegmenter.")
+            except Exception as e:
+                print(f"[StyleFilter] WARNING: Mediapipe Tasks Segmenter failed: {e}. Background removal will use Haar Cascade fallback.")
+
+
 
 
     def apply(self, frame_bgr: np.ndarray) -> np.ndarray:
@@ -127,12 +144,21 @@ class StyleFilter:
         h, w = frame_bgr.shape[:2]
 
         if self._segmenter is not None:
-            # Mediapipe is incredibly fast and gives pixel-perfect segmentation
-            # Convert BGR to RGB for mediapipe
+            # Mediapipe Tasks API for highly accurate segmentation
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            results = self._segmenter.process(frame_rgb)
-            if results.segmentation_mask is not None:
-                mask = results.segmentation_mask.astype(np.float32)
+            mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
+            results = self._segmenter.segment(mp_image)
+            
+            if results.category_mask is not None:
+                mask = results.category_mask.numpy_view().copy().astype(np.float32)
+                # category_mask is 0 for background, 1 for person
+                # normalize just in case it uses 255
+                if mask.max() > 1:
+                    mask = mask / 255.0
+                    
+                mask[mask > 0.5] = 1.0
+                mask[mask <= 0.5] = 0.0
+                
                 # Apply a slight blur for softer edges
                 mask = cv2.GaussianBlur(mask, (5, 5), 0)
                 return mask
