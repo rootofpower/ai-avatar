@@ -103,44 +103,71 @@ class StyleFilter:
 
     def _segment_person(self, frame_bgr: np.ndarray) -> np.ndarray:
         """
-        Simple person segmentation using GrabCut with face detection.
-        Creates a soft mask: 1.0 = person, 0.0 = background.
-        Falls back to elliptical vignette if face detection fails.
+        Person segmentation for MuseTalk 512x512 frames.
+        Uses face detection to build a generous mask covering head, hair,
+        neck, and upper body. Background fades to black with a soft edge.
+
+        For MuseTalk output the face is always roughly centered, so
+        we can be aggressive with the mask coverage.
         """
         h, w = frame_bgr.shape[:2]
 
-        # Detect face for GrabCut hint
+        # Use cached mask if available and same size (face pos doesn't change much)
+        if (self._person_mask_cache is not None and
+                self._person_mask_shape == (h, w)):
+            return self._person_mask_cache
+
+        # Detect face
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         )
         faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(50, 50))
 
+        mask = np.zeros((h, w), dtype=np.float32)
+
         if len(faces) > 0:
-            # Use face to define person region
             fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-            # Expand to include hair, neck, shoulders
-            cx, cy = fx + fw // 2, fy + fh // 2
-            # Person region: wider than face, extends down to bottom
-            pw = int(fw * 2.5)
-            ph = int(fh * 3.5)
-            px = max(0, cx - pw // 2)
-            py = max(0, fy - int(fh * 0.5))  # Include hair above face
+            cx = fx + fw // 2
+            cy = fy + fh // 2
 
-            # Create elliptical mask centered on head/shoulders
-            mask = np.zeros((h, w), dtype=np.float32)
-            center = (cx, min(cy + fh // 2, h - 1))
-            axes = (pw // 2, ph // 2)
-            cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
+            # Build a generous person region:
+            # - Width: 3x face width (covers hair + ears + shoulders)
+            # - Top: start well above face (hair)
+            # - Bottom: extend to frame bottom (body)
+            region_w = min(int(fw * 3.0), w)
+            region_top = max(0, fy - int(fh * 0.8))   # hair above forehead
+            region_left = max(0, cx - region_w // 2)
+            region_right = min(w, cx + region_w // 2)
+            region_bottom = h  # extend to bottom
 
-            # Heavy blur for smooth falloff
-            mask = cv2.GaussianBlur(mask, (51, 51), 0)
-            mask = np.clip(mask * 1.5, 0, 1)  # Boost center
+            # Fill the person rectangle
+            mask[region_top:region_bottom, region_left:region_right] = 1.0
+
+            # Round the top corners with an ellipse for natural head shape
+            head_ellipse_cy = region_top + int(fh * 0.3)
+            head_ellipse_rx = (region_right - region_left) // 2
+            head_ellipse_ry = int(fh * 0.8)
+            cv2.ellipse(mask,
+                        (cx, head_ellipse_cy),
+                        (head_ellipse_rx, head_ellipse_ry),
+                        0, 180, 360, 1.0, -1)
+
+            # Heavy Gaussian blur for very soft falloff at edges
+            mask = cv2.GaussianBlur(mask, (71, 71), 25)
+            # Boost so the center is fully opaque
+            mask = np.clip(mask * 1.8, 0, 1)
         else:
-            # Fallback: centered ellipse
-            mask = np.zeros((h, w), dtype=np.float32)
-            cv2.ellipse(mask, (w // 2, h // 2), (w // 3, h // 2), 0, 0, 360, 1.0, -1)
-            mask = cv2.GaussianBlur(mask, (51, 51), 0)
+            # Fallback: generous centered ellipse covering most of the frame
+            cv2.ellipse(mask, (w // 2, int(h * 0.45)),
+                        (int(w * 0.42), int(h * 0.50)),
+                        0, 0, 360, 1.0, -1)
+            mask = cv2.GaussianBlur(mask, (71, 71), 25)
+            mask = np.clip(mask * 1.5, 0, 1)
+
+        # Cache for next frame
+        self._person_mask_cache = mask
+        self._person_mask_shape = (h, w)
 
         return mask
 
