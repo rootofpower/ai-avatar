@@ -60,7 +60,27 @@ class StyleFilter:
                 self._mp = mp
                 print("[StyleFilter] Successfully loaded Mediapipe Tasks ImageSegmenter.")
             except Exception as e:
-                print(f"[StyleFilter] WARNING: Mediapipe Tasks Segmenter failed: {e}. Background removal will use Haar Cascade fallback.")
+                print(f"[StyleFilter] WARNING: Mediapipe Tasks Segmenter failed: {e}. Trying PyTorch DeepLabV3...")
+                self._segmenter = None
+                
+        self._pt_model = None
+        self._pt_preprocess = None
+        self._device = None
+        if self._remove_bg and self._segmenter is None:
+            try:
+                import torch
+                from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large
+                import torchvision.transforms as T
+                
+                self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                self._pt_model = deeplabv3_mobilenet_v3_large(weights='DEFAULT').to(self._device).eval()
+                self._pt_preprocess = T.Compose([
+                    T.ToTensor(),
+                    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ])
+                print(f"[StyleFilter] Successfully loaded PyTorch DeepLabV3 Segmentation on {self._device}.")
+            except Exception as e:
+                print(f"[StyleFilter] WARNING: PyTorch Segmentation failed: {e}. Falling back to strict Haar Cascades.")
 
 
 
@@ -151,17 +171,29 @@ class StyleFilter:
             
             if results.category_mask is not None:
                 mask = results.category_mask.numpy_view().copy().astype(np.float32)
-                # category_mask is 0 for background, 1 for person
-                # normalize just in case it uses 255
-                if mask.max() > 1:
-                    mask = mask / 255.0
-                    
+                if mask.max() > 1: mask = mask / 255.0
                 mask[mask > 0.5] = 1.0
                 mask[mask <= 0.5] = 0.0
-                
-                # Apply a slight blur for softer edges
                 mask = cv2.GaussianBlur(mask, (5, 5), 0)
                 return mask
+
+        if self._pt_model is not None:
+            # PyTorch DeepLabV3 Segmentation
+            import torch
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            input_tensor = self._pt_preprocess(frame_rgb).unsqueeze(0).to(self._device)
+            with torch.no_grad():
+                output = self._pt_model(input_tensor)['out'][0]
+            
+            # Category 15 is person in Pascal VOC
+            person_class_idx = 15
+            probs = torch.nn.functional.softmax(output, dim=0)
+            person_prob = probs[person_class_idx].cpu().numpy()
+            
+            mask = np.zeros((h, w), dtype=np.float32)
+            mask[person_prob > 0.5] = 1.0
+            mask = cv2.GaussianBlur(mask, (5, 5), 0)
+            return mask
 
         # Fallback: Use cached mask if available and same size (face pos doesn't change much)
         if (self._person_mask_cache is not None and
