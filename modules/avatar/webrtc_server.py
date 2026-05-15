@@ -85,9 +85,16 @@ class IdleAnimator:
             ret, frame = cap.read()
             if not ret:
                 break
-            # Resize to target size
+            # Resize and center crop to maintain aspect ratio
             if frame.shape[0] != self._size or frame.shape[1] != self._size:
-                frame = cv2.resize(frame, (self._size, self._size), interpolation=cv2.INTER_LANCZOS4)
+                h, w = frame.shape[:2]
+                scale = self._size / min(h, w)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                y_off = (new_h - self._size) // 2
+                x_off = (new_w - self._size) // 2
+                frame = frame[y_off:y_off + self._size, x_off:x_off + self._size]
             frames.append(frame)
         cap.release()
 

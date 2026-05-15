@@ -133,6 +133,17 @@ class VisualFrameGenerator:
                 break
             
             try:
+                # Resize and center crop to maintain aspect ratio
+                if frame.shape[0] != 512 or frame.shape[1] != 512:
+                    h, w = frame.shape[:2]
+                    scale = 512 / min(h, w)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                    y_off = (new_h - 512) // 2
+                    x_off = (new_w - 512) // 2
+                    frame = frame[y_off:y_off + 512, x_off:x_off + 512]
+                    
                 # Need to detect bbox per frame to follow head movements
                 bbox = detect_face_bbox(frame, bbox_shift)
                 cropped, adjusted_bbox = crop_face(frame, bbox, extra_margin=extra_margin)
