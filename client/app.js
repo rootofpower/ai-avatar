@@ -43,16 +43,19 @@ async function connect() {
 
         pc = new RTCPeerConnection({ iceServers });
 
+        const remoteStream = new MediaStream();
+        videoEl.srcObject = remoteStream;
+
         // Handle incoming media tracks
         pc.ontrack = (event) => {
             console.log('[WebRTC] Track received:', event.track.kind, event.track.id);
-            console.log('[WebRTC] Streams:', event.streams.length);
+            remoteStream.addTrack(event.track);
+            
             if (event.track.kind === 'video') {
-                videoEl.srcObject = event.streams[0];
                 videoEl.muted = false;
-                console.log('[WebRTC] Video element srcObject set');
+                videoEl.play().catch(e => console.warn('[WebRTC] Autoplay blocked:', e));
+                console.log('[WebRTC] Video track added to remote stream');
             }
-            // Audio track is part of the same stream — browser plays it automatically
         };
 
         // Monitor connection state
