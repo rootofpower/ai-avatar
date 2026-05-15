@@ -167,14 +167,16 @@ class VoiceAssistant:
 
     def _play_audio_file(self, filename: str) -> None:
         """Play audio file in background without blocking the event loop."""
+        import shutil
+        aplay_path = shutil.which("aplay") or "/usr/bin/aplay"
         try:
             subprocess.Popen(
-                ["aplay", filename],
+                [aplay_path, filename],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except FileNotFoundError:
-            print("[WARN] aplay not found, skipping local playback")
+            print("[WARN] aplay not found at /usr/bin/aplay, skipping local playback")
 
     def _save_audio(self, audio_data: bytes, filename: str) -> None:
         """Save raw PCM audio to WAV file."""

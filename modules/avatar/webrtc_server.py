@@ -413,6 +413,7 @@ class WebRTCServer:
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push audio to all connected audio tracks."""
         if not self._audio_tracks:
+            print("[WebRTC] WARNING: Received audio from Gemini, but no WebRTC client is connected to play it!")
             return
         for track in self._audio_tracks:
             await track.push_audio(pcm_48k)
