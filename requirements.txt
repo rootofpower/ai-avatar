@@ -33,3 +33,4 @@ av
 
 # Avatar pipeline - Misc
 omegaconf
+mediapipe
