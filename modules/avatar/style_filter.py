@@ -34,6 +34,20 @@ class StyleFilter:
         self._person_mask_cache: Optional[np.ndarray] = None
         self._person_mask_shape: Optional[Tuple[int, int]] = None
 
+        # Setup Mediapipe Selfie Segmentation if available
+        self._segmenter = None
+        if self._remove_bg:
+            try:
+                import mediapipe as mp
+                # Using general model (0) for better quality, landscape (1) is faster
+                self._segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=0)
+                print("[StyleFilter] Successfully loaded Mediapipe Selfie Segmentation.")
+            except ImportError:
+                print("[StyleFilter] WARNING: Mediapipe not installed. Background removal will use Haar Cascade fallback. Run `pip install mediapipe` for perfect background removal.")
+            except AttributeError:
+                print("[StyleFilter] WARNING: Incompatible Mediapipe version. Background removal will use Haar Cascade fallback.")
+
+
     def apply(self, frame_bgr: np.ndarray) -> np.ndarray:
         """
         Apply cyberpunk style filter to a BGR frame.
@@ -112,7 +126,18 @@ class StyleFilter:
         """
         h, w = frame_bgr.shape[:2]
 
-        # Use cached mask if available and same size (face pos doesn't change much)
+        if self._segmenter is not None:
+            # Mediapipe is incredibly fast and gives pixel-perfect segmentation
+            # Convert BGR to RGB for mediapipe
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            results = self._segmenter.process(frame_rgb)
+            if results.segmentation_mask is not None:
+                mask = results.segmentation_mask.astype(np.float32)
+                # Apply a slight blur for softer edges
+                mask = cv2.GaussianBlur(mask, (5, 5), 0)
+                return mask
+
+        # Fallback: Use cached mask if available and same size (face pos doesn't change much)
         if (self._person_mask_cache is not None and
                 self._person_mask_shape == (h, w)):
             return self._person_mask_cache
