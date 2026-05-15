@@ -48,6 +48,10 @@ class VisualFrameGenerator:
         self._ref_mask_array: Optional[np.ndarray] = None
         self._ref_crop_box: Optional[Tuple[int, int, int, int]] = None
 
+        # Sequence data for dynamic driving video
+        self._ref_frames = []
+        self._frame_idx = 0
+
     def load(self) -> None:
         """Load VAE and UNet models. Call once at startup."""
         print("[VFG] Loading models...")
@@ -107,7 +111,58 @@ class VisualFrameGenerator:
             image, self._ref_bbox
         )
 
+        self._ref_frames = [] # clear any driving video sequence
         print(f"[VFG] Reference image set: {image_path}, bbox={self._ref_bbox}")
+
+    def set_driving_video(self, video_path: str, bbox_shift: int = 0, extra_margin: int = 10, max_frames: int = 100) -> None:
+        """
+        Pre-process a driving video for dynamic head movements.
+        Extracts up to max_frames and precomputes latents for each to avoid inference freezing.
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Cannot open driving video: {video_path}")
+
+        self._ref_frames = []
+        self._frame_idx = 0
+
+        print(f"[VFG] Pre-processing driving video for generation: {video_path}")
+        while len(self._ref_frames) < max_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            try:
+                # Need to detect bbox per frame to follow head movements
+                bbox = detect_face_bbox(frame, bbox_shift)
+                cropped, adjusted_bbox = crop_face(frame, bbox, extra_margin=extra_margin)
+                latent = self._encode_face(cropped)
+                mask_array, crop_box = prepare_blending_mask(frame, adjusted_bbox)
+                
+                self._ref_frames.append({
+                    'image': frame,
+                    'bbox': adjusted_bbox,
+                    'latent': latent,
+                    'mask_array': mask_array,
+                    'crop_box': crop_box
+                })
+            except Exception as e:
+                print(f"[VFG] Skipping frame due to error: {e}")
+                continue
+                
+        cap.release()
+        
+        if not self._ref_frames:
+            raise ValueError(f"No valid frames could be read from {video_path}")
+            
+        print(f"[VFG] Driving video loaded: {len(self._ref_frames)} frames pre-processed.")
+        
+        # Set the first frame as the fallback reference
+        self._ref_image = self._ref_frames[0]['image']
+        self._ref_latent = self._ref_frames[0]['latent']
+        self._ref_bbox = self._ref_frames[0]['bbox']
+        self._ref_mask_array = self._ref_frames[0]['mask_array']
+        self._ref_crop_box = self._ref_frames[0]['crop_box']
 
     def _preprocess_face(self, face_bgr: np.ndarray, half_mask: bool = False) -> torch.Tensor:
         """
@@ -158,11 +213,24 @@ class VisualFrameGenerator:
         Returns:
             Full-resolution composited BGR frame, or None if not ready.
         """
-        if self._ref_latent is None:
+        if not self.has_reference:
             return None
 
+        # Determine which reference data to use (static image or next video frame)
+        if hasattr(self, '_ref_frames') and self._ref_frames:
+            frame_data = self._ref_frames[self._frame_idx]
+            self._frame_idx = (self._frame_idx + 1) % len(self._ref_frames)
+        else:
+            frame_data = {
+                'image': self._ref_image,
+                'bbox': self._ref_bbox,
+                'latent': self._ref_latent,
+                'mask_array': self._ref_mask_array,
+                'crop_box': self._ref_crop_box
+            }
+
         # UNet inference (single step — NOT diffusion)
-        latent_input = self._ref_latent.to(dtype=self._unet.dtype)
+        latent_input = frame_data['latent'].to(dtype=self._unet.dtype)
         pred_latents = self._unet(
             latent_input,
             self._timesteps,
@@ -182,11 +250,11 @@ class VisualFrameGenerator:
 
         # Stitch into full frame
         result = stitch_face(
-            self._ref_image.copy(),
+            frame_data['image'].copy(),
             face_bgr,
-            self._ref_bbox,
-            mask_array=self._ref_mask_array,
-            crop_box=self._ref_crop_box,
+            frame_data['bbox'],
+            mask_array=frame_data['mask_array'],
+            crop_box=frame_data['crop_box'],
         )
 
         return result

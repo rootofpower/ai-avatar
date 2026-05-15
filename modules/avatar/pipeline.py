@@ -119,6 +119,11 @@ class AvatarPipeline:
             import os
             if os.path.exists(self._idle_video):
                 self.webrtc.set_driving_video(self._idle_video)
+                # Also use it for dynamic frame generation to prevent avatar from freezing
+                try:
+                    self.vfg.set_driving_video(self._idle_video)
+                except Exception as e:
+                    print(f"[Pipeline] Could not load driving video for VFG: {e}")
             else:
                 print(f"[Pipeline] Idle video not found: {self._idle_video}")
 
