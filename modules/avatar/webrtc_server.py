@@ -41,9 +41,10 @@ class IdleAnimator:
         self._pad = 8
 
         # Driving video mode
-        self._video_frames: list = []
-        self._video_idx: int = 0
-        self._video_direction: int = 1  # 1=forward, -1=backward (ping-pong)
+        self._state = "idle"
+        self._videos = {}
+        self._video_idx = {}
+        self._video_direction = {}
 
         self._start_time = _time.monotonic()
         if reference_image is not None:
@@ -69,15 +70,15 @@ class IdleAnimator:
         )
         self._start_time = _time.monotonic()
 
-    def set_driving_video(self, video_path: str) -> bool:
+    def set_driving_video(self, state_name: str, video_path: str) -> bool:
         """
-        Load a short driving video for idle animation.
+        Load a short driving video for a specific state (e.g., 'idle', 'thinking').
         All frames are cached in memory for smooth looping.
         Returns True if loaded successfully.
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            print(f"[IdleAnimator] Cannot open driving video: {video_path}")
+            print(f"[StateAnimator] Cannot open driving video for {state_name}: {video_path}")
             return False
 
         frames = []
@@ -99,29 +100,44 @@ class IdleAnimator:
         cap.release()
 
         if not frames:
-            print(f"[IdleAnimator] Driving video is empty: {video_path}")
+            print(f"[StateAnimator] Driving video for {state_name} is empty: {video_path}")
             return False
 
-        self._video_frames = frames
-        self._video_idx = 0
-        self._video_direction = 1
+        self._videos[state_name] = frames
+        self._video_idx[state_name] = 0
+        self._video_direction[state_name] = 1
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         duration = len(frames) / video_fps
-        print(f"[IdleAnimator] Driving video loaded: {len(frames)} frames, {duration:.1f}s (ping-pong loop)")
+        print(f"[StateAnimator] Video for state '{state_name}' loaded: {len(frames)} frames, {duration:.1f}s")
         return True
 
-    def generate(self) -> Optional[np.ndarray]:
-        """Generate one idle-animated frame."""
+    def set_state(self, state: str) -> None:
+        """Change the current animation state."""
+        if state != self._state:
+            self._state = state
+            if state in self._video_idx:
+                self._video_idx[state] = 0
+                self._video_direction[state] = 1
 
-        # Mode 1: Driving video (preferred)
-        if self._video_frames:
-            frame = self._video_frames[self._video_idx]
+    def generate(self) -> Optional[np.ndarray]:
+        """Generate one animated frame for the current state."""
+
+        # Mode 1: Driving video for current state (or fallback to idle video)
+        frames = self._videos.get(self._state)
+        state_key = self._state
+        
+        if not frames and self._state != "idle":
+            frames = self._videos.get("idle")
+            state_key = "idle"
+            
+        if frames:
+            frame = frames[self._video_idx[state_key]]
             # Ping-pong: play forward then backward for seamless loop
-            self._video_idx += self._video_direction
-            if self._video_idx >= len(self._video_frames) - 1:
-                self._video_direction = -1
-            elif self._video_idx <= 0:
-                self._video_direction = 1
+            self._video_idx[state_key] += self._video_direction[state_key]
+            if self._video_idx[state_key] >= len(frames) - 1:
+                self._video_direction[state_key] = -1
+            elif self._video_idx[state_key] <= 0:
+                self._video_direction[state_key] = 1
             return frame.copy()
 
         # Mode 2: Static image fallback
@@ -149,14 +165,14 @@ class AvatarVideoTrack(MediaStreamTrack):
     kind = "video"
 
     def __init__(self, muxer, fps: int = 25, reference_image: Optional[np.ndarray] = None,
-                 driving_video: Optional[str] = None, audio_track=None, style_filter: Optional[StyleFilter] = None):
+                 driving_videos: Optional[dict] = None, audio_track=None, style_filter: Optional[StyleFilter] = None):
         super().__init__()
         self._muxer = muxer
         self._fps = fps
         self._pts = 0
         self._time_base = fractions.Fraction(1, fps)
         self._frame_duration = 1.0 / fps
-        self._idle = IdleAnimator(reference_image, fps)
+        self._animator = StateAnimator(reference_image, fps)
         self._last_speech_frame: Optional[np.ndarray] = None
         self._last_speech_time: float = 0
         self._speech_holdoff: float = 0.5  # hold last frame for 0.5s after speech ends
@@ -166,8 +182,9 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._current_speech_pts: float = -1.0
         self._style_filter = style_filter
 
-        if driving_video:
-            self._idle.set_driving_video(driving_video)
+        if driving_videos:
+            for state_name, path in driving_videos.items():
+                self._animator.set_driving_video(state_name, path)
 
     def reset(self) -> None:
         """Reset speech state for a new conversation turn."""
@@ -177,10 +194,13 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._last_speech_time = 0
 
     def set_reference_image(self, image: np.ndarray) -> None:
-        self._idle.set_reference(image)
+        self._animator.set_reference(image)
 
-    def set_driving_video(self, video_path: str) -> bool:
-        return self._idle.set_driving_video(video_path)
+    def set_driving_video(self, state_name: str, video_path: str) -> bool:
+        return self._animator.set_driving_video(state_name, video_path)
+
+    def set_state(self, state: str) -> None:
+        self._animator.set_state(state)
 
     async def recv(self) -> VideoFrame:
         """Return the next video frame for WebRTC transmission."""
@@ -245,7 +265,7 @@ class AvatarVideoTrack(MediaStreamTrack):
             else:
                 self._last_speech_frame = None
                 # Use idle animation
-                idle_frame = self._idle.generate()
+                idle_frame = self._animator.generate()
                 if idle_frame is not None:
                     # Apply style filter to idle frames too
                     if self._style_filter is not None:
@@ -381,7 +401,7 @@ class WebRTCServer:
         self._turn_password = turn_password
         self._pcs: set = set()
         self._reference_image: Optional[np.ndarray] = None
-        self._driving_video: Optional[str] = None
+        self._driving_videos: dict = {}
         self._audio_tracks: list = []  # active audio tracks for pushing audio
         self._video_tracks: list = []  # active video tracks for reset
         self._style_filter = StyleFilter()
@@ -413,9 +433,16 @@ class WebRTCServer:
         """Set the reference image for idle animation."""
         self._reference_image = image.copy()
 
-    def set_driving_video(self, video_path: str) -> None:
-        """Set the driving video for idle animation."""
-        self._driving_video = video_path
+    def set_driving_video(self, state_name: str, video_path: str) -> None:
+        """Set a driving video for a specific state."""
+        self._driving_videos[state_name] = video_path
+        for track in self._video_tracks:
+            track.set_driving_video(state_name, video_path)
+
+    def set_state(self, state: str) -> None:
+        """Set the current animation state for all video tracks."""
+        for track in self._video_tracks:
+            track.set_state(state)
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push audio to all connected audio tracks."""
@@ -520,7 +547,7 @@ class WebRTCServer:
             video_track = AvatarVideoTrack(
                 self._muxer,
                 reference_image=self._reference_image,
-                driving_video=self._driving_video,
+                driving_videos=self._driving_videos,
                 audio_track=audio_track,
                 style_filter=self._style_filter,
             )

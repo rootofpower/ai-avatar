@@ -27,6 +27,8 @@ class AvatarPipeline:
         models_dir: str = "./models",
         avatar_image: Optional[str] = None,
         idle_video: Optional[str] = None,
+        thinking_video: Optional[str] = None,
+        talking_video: Optional[str] = None,
         device: str = "cuda",
         fps: int = 25,
         webrtc_port: int = 8080,
@@ -38,6 +40,8 @@ class AvatarPipeline:
         self._models_dir = models_dir
         self._avatar_image = avatar_image
         self._idle_video = idle_video
+        self._thinking_video = thinking_video
+        self._talking_video = talking_video
         self._device = device
         self._fps = fps
         self._webrtc_port = webrtc_port
@@ -114,18 +118,24 @@ class AvatarPipeline:
                 print(f"[Pipeline] Avatar image not found: {e}")
                 print("[Pipeline] Pipeline will wait for avatar image to be set.")
 
+        import os
         # Set driving video for idle animation if provided
-        if self._idle_video:
-            import os
-            if os.path.exists(self._idle_video):
-                self.webrtc.set_driving_video(self._idle_video)
-                # Also use it for dynamic frame generation to prevent avatar from freezing
-                try:
-                    self.vfg.set_driving_video(self._idle_video)
-                except Exception as e:
-                    print(f"[Pipeline] Could not load driving video for VFG: {e}")
-            else:
-                print(f"[Pipeline] Idle video not found: {self._idle_video}")
+        if self._idle_video and os.path.exists(self._idle_video):
+            self.webrtc.set_driving_video("idle", self._idle_video)
+        else:
+            print(f"[Pipeline] Idle video not found or not set.")
+            
+        # Set driving video for thinking animation if provided
+        if self._thinking_video and os.path.exists(self._thinking_video):
+            self.webrtc.set_driving_video("thinking", self._thinking_video)
+            
+        # Set driving video for VFG (speaking animation)
+        vfg_video = self._talking_video if (self._talking_video and os.path.exists(self._talking_video)) else self._idle_video
+        if vfg_video and os.path.exists(vfg_video):
+            try:
+                self.vfg.set_driving_video(vfg_video)
+            except Exception as e:
+                print(f"[Pipeline] Could not load driving video for VFG: {e}")
 
         # Start worker tasks
         self._running = True
@@ -280,6 +290,11 @@ class AvatarPipeline:
         # Reset all connected WebRTC video tracks
         for track in self.webrtc._video_tracks:
             track.reset()
+
+    def set_state(self, state: str) -> None:
+        """Set the avatar state (e.g., 'idle', 'thinking')."""
+        if self.webrtc:
+            self.webrtc.set_state(state)
 
     @property
     def is_active(self) -> bool:

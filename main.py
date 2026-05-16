@@ -26,6 +26,8 @@ for _logger_name in [
 AVATAR_ENABLED = os.getenv("AVATAR_ENABLED", "false").lower() == "true"
 AVATAR_IMAGE = os.getenv("AVATAR_IMAGE", "")
 AVATAR_IDLE_VIDEO = os.getenv("AVATAR_IDLE_VIDEO", "")
+AVATAR_THINKING_VIDEO = os.getenv("AVATAR_THINKING_VIDEO", "")
+AVATAR_TALKING_VIDEO = os.getenv("AVATAR_TALKING_VIDEO", "")
 WEBRTC_PORT = int(os.getenv("WEBRTC_PORT", "8080"))
 TURN_SERVER = os.getenv("TURN_SERVER", "")
 TURN_USERNAME = os.getenv("TURN_USERNAME", "")
@@ -89,6 +91,8 @@ class VoiceAssistant:
                 models_dir="./models",
                 avatar_image=AVATAR_IMAGE if AVATAR_IMAGE else None,
                 idle_video=AVATAR_IDLE_VIDEO if AVATAR_IDLE_VIDEO else None,
+                thinking_video=AVATAR_THINKING_VIDEO if AVATAR_THINKING_VIDEO else None,
+                talking_video=AVATAR_TALKING_VIDEO if AVATAR_TALKING_VIDEO else None,
                 webrtc_port=WEBRTC_PORT,
                 turn_server=TURN_SERVER if TURN_SERVER else None,
                 turn_username=TURN_USERNAME if TURN_USERNAME else None,
@@ -114,6 +118,10 @@ class VoiceAssistant:
         while True:
             text = await self.input_queue.get()
             print(f"\n>>> Processing: {text}")
+
+            # Set state to thinking while querying APIs
+            if self.avatar_pipeline and self.avatar_pipeline.is_active:
+                self.avatar_pipeline.set_state("thinking")
 
             # Get answer from TUNA Chat API
             answer_text = None
@@ -162,6 +170,10 @@ class VoiceAssistant:
                 self._play_audio_file(audio_filename)
             else:
                 print("[Gemini] No audio received!")
+            
+            # Return to idle state after speaking
+            if self.avatar_pipeline and self.avatar_pipeline.is_active:
+                self.avatar_pipeline.set_state("idle")
             
             self.input_queue.task_done()
 
