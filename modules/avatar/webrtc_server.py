@@ -21,7 +21,7 @@ import math
 import time as _time
 
 
-class IdleAnimator:
+class StateAnimator:
     """
     Generates idle animation for the avatar when not speaking.
 
