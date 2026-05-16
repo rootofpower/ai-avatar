@@ -34,3 +34,5 @@ av
 # Avatar pipeline - Misc
 omegaconf
 mediapipe
+onnxruntime-gpu
+tensorrt

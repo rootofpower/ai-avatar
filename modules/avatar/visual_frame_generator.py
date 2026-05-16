@@ -36,10 +36,16 @@ class VisualFrameGenerator:
         self._unet_config = unet_config or os.path.join(models_dir, "musetalkV15", "musetalk.json")
         self._unet_model_path = unet_model_path or os.path.join(models_dir, "musetalkV15", "unet.pth")
         self._vae_path = os.path.join(models_dir, vae_type)
+        self._onnx_dir = os.path.join(models_dir, "onnx")
 
         self._vae = None
         self._unet = None
         self._timesteps = None
+
+        # ONNX Runtime sessions (None = use PyTorch fallback)
+        self._ort_unet = None
+        self._ort_vae_decoder = None
+        self._use_onnx = False
 
         # Pre-computed reference data
         self._ref_image: Optional[np.ndarray] = None
@@ -58,7 +64,62 @@ class VisualFrameGenerator:
         self._load_vae()
         self._load_unet()
         self._timesteps = torch.tensor([0], device=self._device)
-        print(f"[VFG] Models loaded on {self._device}")
+        
+        # Try to load ONNX accelerated models
+        self._try_load_onnx()
+        
+        backend = "ONNX Runtime" if self._use_onnx else "PyTorch"
+        print(f"[VFG] Models loaded on {self._device} (backend: {backend})")
+
+    def _try_load_onnx(self) -> None:
+        """Try to load ONNX models for accelerated inference."""
+        unet_onnx = os.path.join(self._onnx_dir, "unet.onnx")
+        vae_onnx = os.path.join(self._onnx_dir, "vae_decoder.onnx")
+        
+        if not os.path.exists(unet_onnx) or not os.path.exists(vae_onnx):
+            print(f"[VFG] ONNX models not found in {self._onnx_dir}, using PyTorch")
+            print(f"[VFG] Run 'python scripts/export_onnx.py' to create ONNX models")
+            return
+        
+        try:
+            import onnxruntime as ort
+            
+            # Build provider list: TensorRT > CUDA > CPU
+            providers = []
+            available = ort.get_available_providers()
+            
+            if 'TensorrtExecutionProvider' in available:
+                providers.append(('TensorrtExecutionProvider', {
+                    'trt_max_workspace_size': 2 * 1024 * 1024 * 1024,
+                    'trt_fp16_enable': True,
+                    'trt_engine_cache_enable': True,
+                    'trt_engine_cache_path': os.path.join(self._onnx_dir, 'trt_cache'),
+                }))
+            if 'CUDAExecutionProvider' in available:
+                providers.append(('CUDAExecutionProvider', {
+                    'device_id': 0,
+                }))
+            providers.append('CPUExecutionProvider')
+            
+            # Load sessions
+            sess_opts = ort.SessionOptions()
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            
+            self._ort_unet = ort.InferenceSession(unet_onnx, sess_options=sess_opts, providers=providers)
+            self._ort_vae_decoder = ort.InferenceSession(vae_onnx, sess_options=sess_opts, providers=providers)
+            
+            active_unet = self._ort_unet.get_providers()[0]
+            active_vae = self._ort_vae_decoder.get_providers()[0]
+            print(f"[VFG] ONNX UNet loaded with {active_unet}")
+            print(f"[VFG] ONNX VAE decoder loaded with {active_vae}")
+            self._use_onnx = True
+            
+        except ImportError:
+            print("[VFG] onnxruntime not installed, using PyTorch")
+            print("[VFG] Install with: pip install onnxruntime-gpu")
+        except Exception as e:
+            print(f"[VFG] Failed to load ONNX models: {e}")
+            print("[VFG] Falling back to PyTorch")
 
     def _load_vae(self) -> None:
         """Load the Stable Diffusion VAE (sd-vae-ft-mse)."""
@@ -240,24 +301,10 @@ class VisualFrameGenerator:
                 'crop_box': self._ref_crop_box
             }
 
-        # UNet inference (single step — NOT diffusion)
-        latent_input = frame_data['latent'].to(dtype=self._unet.dtype)
-        pred_latents = self._unet(
-            latent_input,
-            self._timesteps,
-            encoder_hidden_states=audio_prompt,
-        ).sample
-
-        # VAE decode
-        pred_latents = pred_latents.to(dtype=self._vae.dtype)
-        pred_latents = (1 / self._scaling_factor) * pred_latents
-        decoded = self._vae.decode(pred_latents).sample
-
-        # Post-process: [-1, 1] -> [0, 255] BGR
-        image = (decoded / 2 + 0.5).clamp(0, 1)
-        image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-        image = (image[0] * 255).round().astype(np.uint8)
-        face_bgr = image[:, :, ::-1]  # RGB to BGR
+        # UNet + VAE inference (single step — NOT diffusion)
+        face_bgr = self._run_inference_single(
+            frame_data['latent'], audio_prompt
+        )
 
         # Stitch into full frame
         result = stitch_face(
@@ -269,6 +316,77 @@ class VisualFrameGenerator:
         )
 
         return result
+    @torch.no_grad()
+    def _run_inference_single(self, latent: torch.Tensor, audio_prompt: torch.Tensor) -> np.ndarray:
+        """Run UNet + VAE inference for a single frame (ONNX or PyTorch)."""
+        if self._use_onnx:
+            return self._run_inference_batch_onnx([latent], [audio_prompt])[0]
+        
+        # PyTorch path
+        latent_input = latent.to(dtype=self._unet.dtype)
+        pred_latents = self._unet(
+            latent_input,
+            self._timesteps,
+            encoder_hidden_states=audio_prompt,
+        ).sample
+
+        pred_latents = pred_latents.to(dtype=self._vae.dtype)
+        pred_latents = (1 / self._scaling_factor) * pred_latents
+        decoded = self._vae.decode(pred_latents).sample
+        
+        return self._postprocess_decoded(decoded)[0]
+
+    def _run_inference_batch_onnx(self, latents: list, audio_prompts: list) -> list:
+        """Run batched UNet + VAE inference via ONNX Runtime."""
+        batch_size = len(latents)
+        
+        # Stack into batches
+        batched_latents = torch.cat(latents, dim=0)
+        batched_audio = torch.cat(audio_prompts, dim=0)
+        batched_timesteps = self._timesteps.expand(batch_size)
+        
+        # Convert to numpy for ONNX Runtime
+        sample_np = batched_latents.cpu().numpy().astype(np.float16)
+        timestep_np = batched_timesteps.cpu().numpy().astype(np.int64)
+        hidden_np = batched_audio.cpu().numpy().astype(np.float16)
+        
+        # UNet inference via ONNX
+        unet_output = self._ort_unet.run(None, {
+            'sample': sample_np,
+            'timestep': timestep_np,
+            'encoder_hidden_states': hidden_np,
+        })[0]
+        
+        # Scale latents for VAE
+        pred_latents_np = (unet_output / self._scaling_factor).astype(np.float16)
+        
+        # VAE decode via ONNX
+        decoded_np = self._ort_vae_decoder.run(None, {
+            'latent': pred_latents_np,
+        })[0]
+        
+        # Post-process: [-1, 1] -> [0, 255] BGR
+        decoded_np = np.clip(decoded_np / 2 + 0.5, 0, 1)
+        decoded_np = (decoded_np * 255).round().astype(np.uint8)
+        # Shape: [B, 3, 256, 256] -> list of [256, 256, 3] BGR
+        results = []
+        for i in range(batch_size):
+            face_rgb = np.transpose(decoded_np[i], (1, 2, 0))  # CHW -> HWC
+            face_bgr = face_rgb[:, :, ::-1].copy()  # RGB -> BGR
+            results.append(face_bgr)
+        return results
+
+    @staticmethod
+    def _postprocess_decoded(decoded: torch.Tensor) -> list:
+        """Post-process VAE decoded output to list of BGR face images."""
+        images = (decoded / 2 + 0.5).clamp(0, 1)
+        images = images.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+        results = []
+        for i in range(images.shape[0]):
+            face_rgb = (images[i] * 255).round().astype(np.uint8)
+            face_bgr = face_rgb[:, :, ::-1]  # RGB to BGR
+            results.append(face_bgr)
+        return results
 
     @torch.no_grad()
     def generate_frames_batch(self, audio_prompts: list) -> list:
@@ -304,35 +422,32 @@ class VisualFrameGenerator:
             frame_datas.append(fd)
             latent_inputs.append(fd['latent'])
 
-        # Stack latents and audio prompts into batches
-        batched_latents = torch.cat(latent_inputs, dim=0).to(dtype=self._unet.dtype)
-        batched_audio = torch.cat(audio_prompts, dim=0).to(dtype=self._unet.dtype)
-        batched_timesteps = self._timesteps.expand(batch_size)
+        # Run batched inference (ONNX or PyTorch)
+        if self._use_onnx:
+            face_bgrs = self._run_inference_batch_onnx(latent_inputs, audio_prompts)
+        else:
+            # PyTorch batch path
+            batched_latents = torch.cat(latent_inputs, dim=0).to(dtype=self._unet.dtype)
+            batched_audio = torch.cat(audio_prompts, dim=0).to(dtype=self._unet.dtype)
+            batched_timesteps = self._timesteps.expand(batch_size)
 
-        # Single batched UNet forward pass
-        pred_latents = self._unet(
-            batched_latents,
-            batched_timesteps,
-            encoder_hidden_states=batched_audio,
-        ).sample
+            pred_latents = self._unet(
+                batched_latents,
+                batched_timesteps,
+                encoder_hidden_states=batched_audio,
+            ).sample
 
-        # Single batched VAE decode
-        pred_latents = pred_latents.to(dtype=self._vae.dtype)
-        pred_latents = (1 / self._scaling_factor) * pred_latents
-        decoded = self._vae.decode(pred_latents).sample
+            pred_latents = pred_latents.to(dtype=self._vae.dtype)
+            pred_latents = (1 / self._scaling_factor) * pred_latents
+            decoded = self._vae.decode(pred_latents).sample
+            face_bgrs = self._postprocess_decoded(decoded)
 
-        # Post-process all frames
-        images = (decoded / 2 + 0.5).clamp(0, 1)
-        images = images.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-
+        # Stitch each face into its full frame
         results = []
         for i in range(batch_size):
-            face_rgb = (images[i] * 255).round().astype(np.uint8)
-            face_bgr = face_rgb[:, :, ::-1]  # RGB to BGR
-            
             result = stitch_face(
                 frame_datas[i]['image'].copy(),
-                face_bgr,
+                face_bgrs[i],
                 frame_datas[i]['bbox'],
                 mask_array=frame_datas[i]['mask_array'],
                 crop_box=frame_datas[i]['crop_box'],
