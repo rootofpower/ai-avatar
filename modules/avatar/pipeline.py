@@ -183,47 +183,76 @@ class AvatarPipeline:
 
         GPU inference runs in a thread executor to avoid blocking
         the asyncio event loop (which would starve WebRTC tracks).
+        
+        Uses batched GPU inference: collects up to BATCH_SIZE audio chunks,
+        processes them in a single UNet+VAE forward pass for maximum throughput.
         """
-        print("[Pipeline] Inference worker started.")
+        BATCH_SIZE = 8  # 16GB VRAM can handle this easily
+        BATCH_COLLECT_TIMEOUT = 0.03  # 30ms — collect fast, process faster
+        
+        print(f"[Pipeline] Inference worker started (batch_size={BATCH_SIZE}).")
         loop = asyncio.get_running_loop()
 
         while self._running:
+            # Step 1: Collect a batch of audio chunks
+            chunks = []
             try:
+                # Wait for the first chunk (blocking)
                 chunk = await asyncio.wait_for(
                     self.splitter.inference_queue.get(), timeout=0.5
                 )
+                chunks.append(chunk)
+                
+                # Try to grab more chunks without waiting long
+                for _ in range(BATCH_SIZE - 1):
+                    try:
+                        chunk = await asyncio.wait_for(
+                            self.splitter.inference_queue.get(), 
+                            timeout=BATCH_COLLECT_TIMEOUT
+                        )
+                        chunks.append(chunk)
+                    except asyncio.TimeoutError:
+                        break  # No more chunks ready, process what we have
+                        
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
 
-            if not self.vfg.has_reference:
+            if not self.vfg.has_reference or not chunks:
                 continue
 
             try:
                 t_start = time.monotonic()
+                batch_size = len(chunks)
 
-                # Run GPU-heavy work in thread to not block event loop
-                audio_prompt = await loop.run_in_executor(
-                    None, self.afe.extract, chunk['pcm']
-                )
-                frame = await loop.run_in_executor(
-                    None, self.vfg.generate_frame, audio_prompt
-                )
-
-                # Apply cyberpunk style filter
-                if frame is not None:
-                    frame = await loop.run_in_executor(
-                        None, self.style_filter.apply, frame
+                # Step 2: Extract audio features for all chunks
+                audio_prompts = []
+                for c in chunks:
+                    prompt = await loop.run_in_executor(
+                        None, self.afe.extract, c['pcm']
                     )
+                    audio_prompts.append(prompt)
 
-                if frame is not None:
-                    t_elapsed = (time.monotonic() - t_start) * 1000
-                    q_depth = self.splitter.inference_queue.qsize()
-                    if q_depth > 5 or t_elapsed > 200:
-                        print(f"[Pipeline] Inference: {t_elapsed:.0f}ms, queue: {q_depth}")
-                    # Submit to muxer
-                    await self.muxer.submit_frame(frame, chunk['pts'])
+                # Step 3: Batched GPU inference (UNet + VAE in one pass)
+                frames = await loop.run_in_executor(
+                    None, self.vfg.generate_frames_batch, audio_prompts
+                )
+
+                # Step 4: Apply style filter and submit each frame
+                for i, frame in enumerate(frames):
+                    if frame is not None:
+                        frame = await loop.run_in_executor(
+                            None, self.style_filter.apply, frame
+                        )
+                    if frame is not None:
+                        await self.muxer.submit_frame(frame, chunks[i]['pts'])
+
+                t_elapsed = (time.monotonic() - t_start) * 1000
+                q_depth = self.splitter.inference_queue.qsize()
+                effective_fps = batch_size / (t_elapsed / 1000) if t_elapsed > 0 else 0
+                if q_depth > 3 or t_elapsed > 300:
+                    print(f"[Pipeline] Batch: {batch_size}x in {t_elapsed:.0f}ms ({effective_fps:.0f}fps), queue: {q_depth}")
 
             except Exception as e:
                 print(f"[Pipeline] Inference error: {e}")

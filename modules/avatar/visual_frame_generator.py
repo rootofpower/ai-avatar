@@ -270,6 +270,77 @@ class VisualFrameGenerator:
 
         return result
 
+    @torch.no_grad()
+    def generate_frames_batch(self, audio_prompts: list) -> list:
+        """
+        Generate multiple lip-synced frames in a single batched GPU pass.
+        
+        Args:
+            audio_prompts: list of whisper embedding tensors from AFE.extract()
+            
+        Returns:
+            List of full-resolution composited BGR frames.
+        """
+        if not self.has_reference or not audio_prompts:
+            return []
+
+        batch_size = len(audio_prompts)
+        
+        # Collect frame data for each item in the batch
+        frame_datas = []
+        latent_inputs = []
+        for _ in range(batch_size):
+            if hasattr(self, '_ref_frames') and self._ref_frames:
+                fd = self._ref_frames[self._frame_idx]
+                self._frame_idx = (self._frame_idx + 1) % len(self._ref_frames)
+            else:
+                fd = {
+                    'image': self._ref_image,
+                    'bbox': self._ref_bbox,
+                    'latent': self._ref_latent,
+                    'mask_array': self._ref_mask_array,
+                    'crop_box': self._ref_crop_box
+                }
+            frame_datas.append(fd)
+            latent_inputs.append(fd['latent'])
+
+        # Stack latents and audio prompts into batches
+        batched_latents = torch.cat(latent_inputs, dim=0).to(dtype=self._unet.dtype)
+        batched_audio = torch.cat(audio_prompts, dim=0).to(dtype=self._unet.dtype)
+        batched_timesteps = self._timesteps.expand(batch_size)
+
+        # Single batched UNet forward pass
+        pred_latents = self._unet(
+            batched_latents,
+            batched_timesteps,
+            encoder_hidden_states=batched_audio,
+        ).sample
+
+        # Single batched VAE decode
+        pred_latents = pred_latents.to(dtype=self._vae.dtype)
+        pred_latents = (1 / self._scaling_factor) * pred_latents
+        decoded = self._vae.decode(pred_latents).sample
+
+        # Post-process all frames
+        images = (decoded / 2 + 0.5).clamp(0, 1)
+        images = images.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+
+        results = []
+        for i in range(batch_size):
+            face_rgb = (images[i] * 255).round().astype(np.uint8)
+            face_bgr = face_rgb[:, :, ::-1]  # RGB to BGR
+            
+            result = stitch_face(
+                frame_datas[i]['image'].copy(),
+                face_bgr,
+                frame_datas[i]['bbox'],
+                mask_array=frame_datas[i]['mask_array'],
+                crop_box=frame_datas[i]['crop_box'],
+            )
+            results.append(result)
+
+        return results
+
     @property
     def is_loaded(self) -> bool:
         return self._vae is not None and self._unet is not None
