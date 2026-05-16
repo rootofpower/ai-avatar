@@ -114,10 +114,8 @@ class StateAnimator:
     def set_state(self, state: str) -> None:
         """Change the current animation state."""
         if state != self._state:
+            print(f"[StateAnimator] State: {self._state} -> {state}")
             self._state = state
-            if state in self._video_idx:
-                self._video_idx[state] = 0
-                self._video_direction[state] = 1
 
     def generate(self) -> Optional[np.ndarray]:
         """Generate one animated frame for the current state."""

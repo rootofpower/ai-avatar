@@ -146,10 +146,16 @@ class VoiceAssistant:
             # Stream audio from Gemini and feed to avatar pipeline
             print("Generating streaming response...")
             audio_chunks = []
+            first_audio = True
             
             async for audio_chunk, is_final in self.llm.generate_response_streaming(text, answer_text):
                 if audio_chunk:
                     audio_chunks.append(audio_chunk)
+                    
+                    # Switch to talking state on first audio chunk
+                    if first_audio and self.avatar_pipeline and self.avatar_pipeline.is_active:
+                        self.avatar_pipeline.set_state("talking")
+                        first_audio = False
                     
                     # Feed audio to avatar pipeline for lip-sync generation
                     if self.avatar_pipeline and self.avatar_pipeline.is_active:
@@ -168,6 +174,11 @@ class VoiceAssistant:
                 self._save_audio(complete_audio, audio_filename)
                 print(f"Playing audio...")
                 self._play_audio_file(audio_filename)
+                
+                # Wait for WebRTC audio buffer to finish playing before going idle
+                if self.avatar_pipeline and self.avatar_pipeline.is_active:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(duration_s + 0.5)
             else:
                 print("[Gemini] No audio received!")
             
