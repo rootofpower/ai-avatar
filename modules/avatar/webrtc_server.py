@@ -242,56 +242,55 @@ class AvatarVideoTrack(MediaStreamTrack):
         
         if self._audio_track is not None:
             target_pts = self._audio_track.speech_time
-            
-            if target_pts > 0:
-                # Take ONE frame per recv() call — never skip frames
-                # (With batching, frames arrive in bursts; consuming all at once wastes them)
-                try:
-                    entry = self._muxer.video_queue.get_nowait()
-                    # Save previous frame for interpolation
-                    if self._current_speech_frame is not None:
-                        self._prev_speech_frame = self._current_speech_frame
-                        now = _time.monotonic()
-                        if self._interp_new_time > 0:
-                            self._interp_interval = max(0.04, now - self._interp_new_time)
-                        self._interp_new_time = now
-                    else:
-                        self._interp_new_time = _time.monotonic()
-                    
-                    self._current_speech_frame = entry['frame']
-                    self._current_speech_pts = entry['pts']
-                    self._last_speech_time = _time.monotonic()
-                    self._last_speech_frame = entry['frame']
-                except asyncio.QueueEmpty:
-                    pass  # No new frame — interpolate between existing ones
-                
-                # Interpolate between previous and current MuseTalk keyframes
-                if self._current_speech_frame is not None:
-                    if self._prev_speech_frame is not None and self._interp_new_time > 0:
-                        elapsed = _time.monotonic() - self._interp_new_time
-                        alpha = min(1.0, elapsed / self._interp_interval)
-                        frame_bgr = cv2.addWeighted(
-                            self._prev_speech_frame, 1.0 - alpha,
-                            self._current_speech_frame, alpha, 0
-                        )
-                    else:
-                        frame_bgr = self._current_speech_frame
-                
-                self._fade_out_counter = 0
-            else:
-                self._current_speech_pts = -1.0
-                self._current_speech_frame = None
-                self._prev_speech_frame = None
-
-        else:
-            # Fallback if audio_track not provided (should not happen)
+        
+        # Show speech frames when audio is playing OR queued frames exist
+        has_queued_frames = not self._muxer.video_queue.empty()
+        is_speaking = target_pts > 0 or has_queued_frames or self._current_speech_frame is not None
+        
+        if is_speaking:
+            # Take ONE frame per recv() call — never skip frames
             try:
                 entry = self._muxer.video_queue.get_nowait()
-                frame_bgr = entry['frame']
+                # Save previous frame for interpolation
+                if self._current_speech_frame is not None:
+                    self._prev_speech_frame = self._current_speech_frame
+                    now = _time.monotonic()
+                    if self._interp_new_time > 0:
+                        self._interp_interval = max(0.04, now - self._interp_new_time)
+                    self._interp_new_time = now
+                else:
+                    self._interp_new_time = _time.monotonic()
+                
+                self._current_speech_frame = entry['frame']
+                self._current_speech_pts = entry['pts']
                 self._last_speech_time = _time.monotonic()
                 self._last_speech_frame = entry['frame']
             except asyncio.QueueEmpty:
-                pass
+                # No new frame available
+                # If audio has stopped AND no frames in queue, end speech mode
+                if target_pts <= 0 and not has_queued_frames:
+                    if _time.monotonic() - self._last_speech_time > 0.5:
+                        self._current_speech_frame = None
+                        self._prev_speech_frame = None
+                        self._current_speech_pts = -1.0
+            
+            # Interpolate between previous and current MuseTalk keyframes
+            if self._current_speech_frame is not None:
+                if self._prev_speech_frame is not None and self._interp_new_time > 0:
+                    elapsed = _time.monotonic() - self._interp_new_time
+                    alpha = min(1.0, elapsed / self._interp_interval)
+                    frame_bgr = cv2.addWeighted(
+                        self._prev_speech_frame, 1.0 - alpha,
+                        self._current_speech_frame, alpha, 0
+                    )
+                else:
+                    frame_bgr = self._current_speech_frame
+            
+            self._fade_out_counter = 0
+
+        else:
+            # Fully idle — no audio, no queued frames, no held frame
+            pass
 
         if frame_bgr is not None:
             frame_rgb = frame_bgr[:, :, ::-1].copy()
