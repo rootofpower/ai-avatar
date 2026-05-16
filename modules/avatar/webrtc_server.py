@@ -43,13 +43,10 @@ class StateAnimator:
         # Driving video mode
         self._state = "idle"
         self._videos = {}
-        self._video_idx = {}
-        self._video_direction = {}
-        
-        # Cross-fade transition
-        self._prev_state = None
-        self._transition_length = 10  # frames (~400ms at 25fps)
-        self._transition_frames_left = 0
+        # Single shared playback cursor (since most states fallback to idle video)
+        self._cursor_idx = 0
+        self._cursor_dir = 1
+        self._cursor_video_key = None  # which video the cursor is currently tracking
 
         self._start_time = _time.monotonic()
         if reference_image is not None:
@@ -59,12 +56,10 @@ class StateAnimator:
         """Set or update the reference image (BGR, center-cropped to 512x512)."""
         h, w = image.shape[:2]
         if h != self._size or w != self._size:
-            # Resize preserving aspect ratio (fit the larger dimension)
             scale = self._size / min(h, w)
             new_w = int(w * scale)
             new_h = int(h * scale)
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-            # Center crop to 512x512
             y_off = (new_h - self._size) // 2
             x_off = (new_w - self._size) // 2
             image = image[y_off:y_off + self._size, x_off:x_off + self._size]
@@ -109,53 +104,49 @@ class StateAnimator:
             return False
 
         self._videos[state_name] = frames
-        self._video_idx[state_name] = 0
-        self._video_direction[state_name] = 1
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         duration = len(frames) / video_fps
         print(f"[StateAnimator] Video for state '{state_name}' loaded: {len(frames)} frames, {duration:.1f}s")
         return True
 
+    def _resolve_video(self, state: str):
+        """Resolve which video frames to use for a given state."""
+        if state in self._videos:
+            return state, self._videos[state]
+        if state != "idle" and "idle" in self._videos:
+            return "idle", self._videos["idle"]
+        return None, None
+
     def set_state(self, state: str) -> None:
-        """Change the current animation state with cross-fade."""
+        """Change the current animation state."""
         if state != self._state:
-            print(f"[StateAnimator] State: {self._state} -> {state}")
-            self._prev_state = self._state
+            old_key, _ = self._resolve_video(self._state)
+            new_key, _ = self._resolve_video(state)
+            print(f"[StateAnimator] State: {self._state} -> {state} (video: {old_key} -> {new_key})")
             self._state = state
-            self._transition_frames_left = self._transition_length
+            # If we're switching to a genuinely different video, reset cursor
+            if new_key != old_key and new_key is not None:
+                self._cursor_idx = 0
+                self._cursor_dir = 1
+                self._cursor_video_key = new_key
 
     def generate(self) -> Optional[np.ndarray]:
-        """Generate one animated frame for the current state, with cross-fade transitions."""
-
-        current_frame = self._generate_for_state(self._state)
+        """Generate one animated frame for the current state."""
+        video_key, frames = self._resolve_video(self._state)
         
-        # Cross-fade during transition
-        if self._transition_frames_left > 0 and self._prev_state is not None:
-            prev_frame = self._generate_for_state(self._prev_state)
-            if current_frame is not None and prev_frame is not None:
-                alpha = 1.0 - (self._transition_frames_left / self._transition_length)
-                current_frame = cv2.addWeighted(prev_frame, 1.0 - alpha, current_frame, alpha, 0)
-            self._transition_frames_left -= 1
-            
-        return current_frame
-
-    def _generate_for_state(self, state: str) -> Optional[np.ndarray]:
-        """Generate a frame for a specific state without transition logic."""
-        frames = self._videos.get(state)
-        state_key = state
-        
-        if not frames and state != "idle":
-            frames = self._videos.get("idle")
-            state_key = "idle"
-            
         if frames:
-            frame = frames[self._video_idx[state_key]]
+            # Clamp cursor to valid range
+            if self._cursor_idx >= len(frames):
+                self._cursor_idx = len(frames) - 1
+                self._cursor_dir = -1
+            
+            frame = frames[self._cursor_idx]
             # Ping-pong: play forward then backward for seamless loop
-            self._video_idx[state_key] += self._video_direction[state_key]
-            if self._video_idx[state_key] >= len(frames) - 1:
-                self._video_direction[state_key] = -1
-            elif self._video_idx[state_key] <= 0:
-                self._video_direction[state_key] = 1
+            self._cursor_idx += self._cursor_dir
+            if self._cursor_idx >= len(frames) - 1:
+                self._cursor_dir = -1
+            elif self._cursor_idx <= 0:
+                self._cursor_dir = 1
             return frame.copy()
 
         # Mode 2: Static image fallback
@@ -240,7 +231,6 @@ class AvatarVideoTrack(MediaStreamTrack):
         # -------------------------------------
 
         frame_bgr = None
-        got_new_speech_frame = False
         target_pts = 0.0
         
         if self._audio_track is not None:
@@ -256,25 +246,14 @@ class AvatarVideoTrack(MediaStreamTrack):
                             self._current_speech_pts = entry['pts']
                             self._last_speech_time = _time.monotonic()
                             self._last_speech_frame = entry['frame']
-                            got_new_speech_frame = True
                         else:
                             break
                 except asyncio.QueueEmpty:
                     pass
                 
-                if got_new_speech_frame:
-                    # Fresh MuseTalk frame — use it directly
-                    frame_bgr = self._current_speech_frame
-                    self._fade_out_counter = 0
-                else:
-                    # No new MuseTalk frame — show state animation to keep motion alive
-                    anim_frame = self._animator.generate()
-                    if anim_frame is not None and self._style_filter is not None:
-                        anim_frame = self._style_filter.apply(anim_frame)
-                    if anim_frame is not None:
-                        frame_bgr = anim_frame
-                    else:
-                        frame_bgr = self._current_speech_frame  # absolute fallback
+                # Hold the current MuseTalk frame (even if it's the same as last time)
+                frame_bgr = self._current_speech_frame
+                self._fade_out_counter = 0
             else:
                 self._current_speech_pts = -1.0
                 self._current_speech_frame = None
