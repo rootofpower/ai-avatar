@@ -45,6 +45,11 @@ class StateAnimator:
         self._videos = {}
         self._video_idx = {}
         self._video_direction = {}
+        
+        # Cross-fade transition
+        self._prev_state = None
+        self._transition_length = 10  # frames (~400ms at 25fps)
+        self._transition_frames_left = 0
 
         self._start_time = _time.monotonic()
         if reference_image is not None:
@@ -112,19 +117,34 @@ class StateAnimator:
         return True
 
     def set_state(self, state: str) -> None:
-        """Change the current animation state."""
+        """Change the current animation state with cross-fade."""
         if state != self._state:
             print(f"[StateAnimator] State: {self._state} -> {state}")
+            self._prev_state = self._state
             self._state = state
+            self._transition_frames_left = self._transition_length
 
     def generate(self) -> Optional[np.ndarray]:
-        """Generate one animated frame for the current state."""
+        """Generate one animated frame for the current state, with cross-fade transitions."""
 
-        # Mode 1: Driving video for current state (or fallback to idle video)
-        frames = self._videos.get(self._state)
-        state_key = self._state
+        current_frame = self._generate_for_state(self._state)
         
-        if not frames and self._state != "idle":
+        # Cross-fade during transition
+        if self._transition_frames_left > 0 and self._prev_state is not None:
+            prev_frame = self._generate_for_state(self._prev_state)
+            if current_frame is not None and prev_frame is not None:
+                alpha = 1.0 - (self._transition_frames_left / self._transition_length)
+                current_frame = cv2.addWeighted(prev_frame, 1.0 - alpha, current_frame, alpha, 0)
+            self._transition_frames_left -= 1
+            
+        return current_frame
+
+    def _generate_for_state(self, state: str) -> Optional[np.ndarray]:
+        """Generate a frame for a specific state without transition logic."""
+        frames = self._videos.get(state)
+        state_key = state
+        
+        if not frames and state != "idle":
             frames = self._videos.get("idle")
             state_key = "idle"
             
@@ -173,12 +193,13 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._animator = StateAnimator(reference_image, fps)
         self._last_speech_frame: Optional[np.ndarray] = None
         self._last_speech_time: float = 0
-        self._speech_holdoff: float = 0.5  # hold last frame for 0.5s after speech ends
         self._next_pts_time: Optional[float] = None
         self._audio_track = audio_track
         self._current_speech_frame: Optional[np.ndarray] = None
         self._current_speech_pts: float = -1.0
         self._style_filter = style_filter
+        self._fade_out_counter: int = 0
+        self._fade_out_length: int = 12  # cross-fade over ~0.5s at 25fps
 
         if driving_videos:
             for state_name, path in driving_videos.items():
@@ -190,6 +211,7 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._current_speech_pts = -1.0
         self._last_speech_frame = None
         self._last_speech_time = 0
+        self._fade_out_counter = 0
 
     def set_reference_image(self, image: np.ndarray) -> None:
         self._animator.set_reference(image)
@@ -218,6 +240,7 @@ class AvatarVideoTrack(MediaStreamTrack):
         # -------------------------------------
 
         frame_bgr = None
+        got_new_speech_frame = False
         target_pts = 0.0
         
         if self._audio_track is not None:
@@ -232,12 +255,26 @@ class AvatarVideoTrack(MediaStreamTrack):
                             self._current_speech_frame = entry['frame']
                             self._current_speech_pts = entry['pts']
                             self._last_speech_time = _time.monotonic()
+                            self._last_speech_frame = entry['frame']
+                            got_new_speech_frame = True
                         else:
                             break
                 except asyncio.QueueEmpty:
                     pass
                 
-                frame_bgr = self._current_speech_frame
+                if got_new_speech_frame:
+                    # Fresh MuseTalk frame — use it directly
+                    frame_bgr = self._current_speech_frame
+                    self._fade_out_counter = 0
+                else:
+                    # No new MuseTalk frame — show state animation to keep motion alive
+                    anim_frame = self._animator.generate()
+                    if anim_frame is not None and self._style_filter is not None:
+                        anim_frame = self._style_filter.apply(anim_frame)
+                    if anim_frame is not None:
+                        frame_bgr = anim_frame
+                    else:
+                        frame_bgr = self._current_speech_frame  # absolute fallback
             else:
                 self._current_speech_pts = -1.0
                 self._current_speech_frame = None
@@ -248,6 +285,7 @@ class AvatarVideoTrack(MediaStreamTrack):
                 entry = self._muxer.video_queue.get_nowait()
                 frame_bgr = entry['frame']
                 self._last_speech_time = _time.monotonic()
+                self._last_speech_frame = entry['frame']
             except asyncio.QueueEmpty:
                 pass
 
@@ -255,24 +293,32 @@ class AvatarVideoTrack(MediaStreamTrack):
             frame_rgb = frame_bgr[:, :, ::-1].copy()
             frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
         else:
-            # Hold last speech frame briefly before returning to idle
-            if (self._last_speech_frame is not None and
-                    _time.monotonic() - self._last_speech_time < self._speech_holdoff):
-                frame_rgb = self._last_speech_frame[:, :, ::-1].copy()
+            # Fade out from last speech frame to idle animation
+            idle_frame = self._animator.generate()
+            if idle_frame is not None and self._style_filter is not None:
+                idle_frame = self._style_filter.apply(idle_frame)
+            
+            if (self._last_speech_frame is not None and 
+                    self._fade_out_counter < self._fade_out_length):
+                # Cross-fade: blend last speech frame with idle
+                alpha = self._fade_out_counter / self._fade_out_length
+                self._fade_out_counter += 1
+                if idle_frame is not None:
+                    blended = cv2.addWeighted(
+                        self._last_speech_frame, 1.0 - alpha, idle_frame, alpha, 0
+                    )
+                    frame_rgb = blended[:, :, ::-1].copy()
+                else:
+                    frame_rgb = self._last_speech_frame[:, :, ::-1].copy()
+                frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
+            elif idle_frame is not None:
+                self._last_speech_frame = None
+                frame_rgb = idle_frame[:, :, ::-1].copy()
                 frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
             else:
                 self._last_speech_frame = None
-                # Use idle animation
-                idle_frame = self._animator.generate()
-                if idle_frame is not None:
-                    # Apply style filter to idle frames too
-                    if self._style_filter is not None:
-                        idle_frame = self._style_filter.apply(idle_frame)
-                    frame_rgb = idle_frame[:, :, ::-1].copy()
-                    frame = VideoFrame.from_ndarray(frame_rgb, format='rgb24')
-                else:
-                    black = np.zeros((512, 512, 3), dtype=np.uint8)
-                    frame = VideoFrame.from_ndarray(black, format='rgb24')
+                black = np.zeros((512, 512, 3), dtype=np.uint8)
+                frame = VideoFrame.from_ndarray(black, format='rgb24')
 
         frame.pts = self._pts
         frame.time_base = self._time_base

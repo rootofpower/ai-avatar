@@ -174,11 +174,6 @@ class VoiceAssistant:
                 self._save_audio(complete_audio, audio_filename)
                 print(f"Playing audio...")
                 self._play_audio_file(audio_filename)
-                
-                # Wait for WebRTC audio buffer to finish playing before going idle
-                if self.avatar_pipeline and self.avatar_pipeline.is_active:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(duration_s + 0.5)
             else:
                 print("[Gemini] No audio received!")
             
