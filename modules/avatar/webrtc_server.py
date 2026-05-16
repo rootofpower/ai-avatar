@@ -239,7 +239,7 @@ class AvatarVideoTrack(MediaStreamTrack):
 
         frame_bgr = None
         target_pts = 0.0
-        
+    
         if self._audio_track is not None:
             target_pts = self._audio_track.speech_time
         
@@ -289,7 +289,8 @@ class AvatarVideoTrack(MediaStreamTrack):
             self._fade_out_counter = 0
 
         else:
-            # Fully idle — no audio, no queued frames, no held frame
+            # Fully idle — no audio, no queued frames, no held fram
+            
             pass
 
         if frame_bgr is not None:
