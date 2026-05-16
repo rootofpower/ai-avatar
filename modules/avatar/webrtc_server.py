@@ -191,6 +191,11 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._style_filter = style_filter
         self._fade_out_counter: int = 0
         self._fade_out_length: int = 12  # cross-fade over ~0.5s at 25fps
+        
+        # Frame interpolation for smooth speech animation
+        self._prev_speech_frame: Optional[np.ndarray] = None
+        self._interp_new_time: float = 0  # when the newest keyframe arrived
+        self._interp_interval: float = 0.1  # expected time between keyframes (~100ms)
 
         if driving_videos:
             for state_name, path in driving_videos.items():
@@ -203,6 +208,8 @@ class AvatarVideoTrack(MediaStreamTrack):
         self._last_speech_frame = None
         self._last_speech_time = 0
         self._fade_out_counter = 0
+        self._prev_speech_frame = None
+        self._interp_new_time = 0
 
     def set_reference_image(self, image: np.ndarray) -> None:
         self._animator.set_reference(image)
@@ -242,6 +249,17 @@ class AvatarVideoTrack(MediaStreamTrack):
                     while True:
                         if self._current_speech_pts < target_pts:
                             entry = self._muxer.video_queue.get_nowait()
+                            # Save previous frame for interpolation
+                            if self._current_speech_frame is not None:
+                                self._prev_speech_frame = self._current_speech_frame
+                                # Measure actual interval between keyframes
+                                now = _time.monotonic()
+                                if self._interp_new_time > 0:
+                                    self._interp_interval = max(0.04, now - self._interp_new_time)
+                                self._interp_new_time = now
+                            else:
+                                self._interp_new_time = _time.monotonic()
+                            
                             self._current_speech_frame = entry['frame']
                             self._current_speech_pts = entry['pts']
                             self._last_speech_time = _time.monotonic()
@@ -251,12 +269,24 @@ class AvatarVideoTrack(MediaStreamTrack):
                 except asyncio.QueueEmpty:
                     pass
                 
-                # Hold the current MuseTalk frame (even if it's the same as last time)
-                frame_bgr = self._current_speech_frame
+                # Interpolate between previous and current MuseTalk keyframes
+                if self._current_speech_frame is not None:
+                    if self._prev_speech_frame is not None and self._interp_new_time > 0:
+                        elapsed = _time.monotonic() - self._interp_new_time
+                        # alpha 0→1 over the expected interval until next keyframe
+                        alpha = min(1.0, elapsed / self._interp_interval)
+                        frame_bgr = cv2.addWeighted(
+                            self._prev_speech_frame, 1.0 - alpha,
+                            self._current_speech_frame, alpha, 0
+                        )
+                    else:
+                        frame_bgr = self._current_speech_frame
+                
                 self._fade_out_counter = 0
             else:
                 self._current_speech_pts = -1.0
                 self._current_speech_frame = None
+                self._prev_speech_frame = None
 
         else:
             # Fallback if audio_track not provided (should not happen)
