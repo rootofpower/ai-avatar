@@ -65,9 +65,35 @@ async function connect() {
                 videoEl.play().catch(e => console.warn('[WebRTC] Video Autoplay blocked:', e));
                 console.log('[WebRTC] Video track added to remote stream');
             } else if (event.track.kind === 'audio') {
-                const audioStream = new MediaStream([event.track]);
-                audioEl.srcObject = audioStream;
-                audioEl.play().catch(e => console.warn('[WebRTC] Audio Autoplay blocked:', e));
+                console.log('[Audio] Element in DOM:', !!document.getElementById('avatar-audio'));
+                const audioEl = document.getElementById('avatar-audio');
+                
+                if (audioEl) {
+                    console.log('[Audio] Element muted status:', audioEl.muted);
+                    const audioStream = new MediaStream([event.track]);
+                    audioEl.srcObject = audioStream;
+                    console.log('[Audio] Tracks in srcObject:', audioEl.srcObject?.getAudioTracks().length);
+                    
+                    audioEl.play()
+                        .then(() => console.log('[Audio] Playback started successfully'))
+                        .catch(e => {
+                            console.error('[Audio] Playback failed:', e);
+                            if (e.name === 'NotAllowedError') {
+                                console.warn('[Audio] Autoplay blocked. Waiting for user gesture...');
+                                const playOnGesture = () => {
+                                    audioEl.play()
+                                        .then(() => {
+                                            console.log('[Audio] Playback started after gesture');
+                                            document.removeEventListener('click', playOnGesture);
+                                        })
+                                        .catch(err => console.error('[Audio] Gesture play failed:', err));
+                                };
+                                document.addEventListener('click', playOnGesture);
+                            }
+                        });
+                } else {
+                    console.error('[Audio] Element #avatar-audio NOT FOUND in DOM during ontrack');
+                }
                 console.log('[WebRTC] Audio track attached to dedicated element');
             }
         };
