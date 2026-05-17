@@ -6,7 +6,7 @@ import json
 import numpy as np
 from typing import Optional
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCConfiguration, RTCIceServer
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from av import VideoFrame, AudioFrame
 
 from fastapi import FastAPI, Request
@@ -466,14 +466,8 @@ class WebRTCServer:
     Serves the client HTML and handles SDP/ICE exchange.
     """
 
-    def __init__(self, muxer, stun_server: str = "stun:stun.l.google.com:19302",
-                 turn_server: Optional[str] = None, turn_username: Optional[str] = None,
-                 turn_password: Optional[str] = None):
+    def __init__(self, muxer):
         self._muxer = muxer
-        self._stun_server = stun_server
-        self._turn_server = turn_server
-        self._turn_username = turn_username
-        self._turn_password = turn_password
         self._pcs: set = set()
         self._reference_image: Optional[np.ndarray] = None
         self._driving_videos: dict = {}
@@ -481,26 +475,8 @@ class WebRTCServer:
         self._video_tracks: list = []  # active video tracks for reset
         self._style_filter = StyleFilter()
 
-        # Build ICE servers list
-        self._ice_servers = [RTCIceServer(urls=[stun_server])]
-        if turn_server and turn_username and turn_password:
-            self._ice_servers.append(RTCIceServer(
-                urls=[turn_server],
-                username=turn_username,
-                credential=turn_password,
-            ))
-            # Also add TURNS (TLS) variant on port 443
-            turns_url = turn_server.replace("turn:", "turns:", 1)
-            if ":80" in turns_url:
-                turns_url = turns_url.replace(":80", ":443")
-            self._ice_servers.append(RTCIceServer(
-                urls=[turns_url],
-                username=turn_username,
-                credential=turn_password,
-            ))
-            print(f"[WebRTC] TURN server configured: {turn_server}")
-        else:
-            print(f"[WebRTC] No TURN server configured (STUN only)")
+        # ZeroTier networking: no STUN/TURN servers needed
+        self._ice_servers = []
 
         self.app = self._create_app()
 
@@ -561,24 +537,8 @@ class WebRTCServer:
 
         @app.get("/ice-config")
         async def ice_config():
-            """Return ICE server configuration for the client."""
-            servers = [{"urls": self._stun_server}]
-            if self._turn_server and self._turn_username and self._turn_password:
-                servers.append({
-                    "urls": self._turn_server,
-                    "username": self._turn_username,
-                    "credential": self._turn_password,
-                })
-                # TURNS variant
-                turns_url = self._turn_server.replace("turn:", "turns:", 1)
-                if ":80" in turns_url:
-                    turns_url = turns_url.replace(":80", ":443")
-                servers.append({
-                    "urls": turns_url,
-                    "username": self._turn_username,
-                    "credential": self._turn_password,
-                })
-            return JSONResponse({"iceServers": servers})
+            """Return ICE server configuration for the client (Empty for ZeroTier)."""
+            return JSONResponse({"iceServers": []})
 
         @app.post("/offer")
         async def offer(request: Request):
@@ -587,14 +547,10 @@ class WebRTCServer:
             print(f"[WebRTC] Received offer from client (type={params['type']})")
             offer_sdp = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-            pc = RTCPeerConnection(configuration=RTCConfiguration(
-                iceServers=self._ice_servers
-            ))
+            # ZeroTier networking: no STUN/TURN servers needed
+            pc = RTCPeerConnection()
             self._pcs.add(pc)
-            ice_info = f"STUN: {self._stun_server}"
-            if self._turn_server:
-                ice_info += f", TURN: {self._turn_server}"
-            print(f"[WebRTC] Created PeerConnection ({ice_info})")
+            print(f"[WebRTC] Created PeerConnection (Local/ZeroTier)")
 
             @pc.on("connectionstatechange")
             async def on_connectionstatechange():
