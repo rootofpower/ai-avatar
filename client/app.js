@@ -27,6 +27,13 @@ async function connect() {
     setStatus('connecting', 'Connecting...');
     btnConnect.disabled = true;
 
+    // Prime the audio and video elements to unlock autoplay on iOS/Safari/Chrome
+    const audioEl = document.getElementById('avatar-audio');
+    if (audioEl) {
+        audioEl.play().catch(e => {}); // Ignore error, just unlocks audio context
+    }
+    videoEl.play().catch(e => {});
+
     try {
         // Fetch ICE server config (STUN + TURN) from server
         let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
