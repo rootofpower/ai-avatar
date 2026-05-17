@@ -18,8 +18,8 @@ class AudioSplitter:
     INPUT_SAMPLE_RATE = 24000
     TARGET_SAMPLE_RATE = 16000
     SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
-    CHUNK_DURATION_MS = 200
-    CHUNK_SAMPLES = int(TARGET_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)  # 3200
+    CHUNK_DURATION_MS = 40  # 40ms exactly matches 25 FPS video (1 frame per chunk)
+    CHUNK_SAMPLES = int(TARGET_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)  # 640
     STALE_THRESHOLD_MS = 1000
 
     def __init__(self):
