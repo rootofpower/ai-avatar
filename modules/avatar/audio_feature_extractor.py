@@ -136,6 +136,58 @@ class AudioFeatureExtractor:
 
         return audio_prompt
 
+    @torch.no_grad()
+    def extract_batch(self, pcm_list: list) -> list:
+        """
+        Extract audio features from multiple PCM chunks in a single batched pass.
+        
+        Instead of N sequential Whisper encoder calls, computes mel features
+        for each chunk (CPU), stacks them, and runs ONE encoder forward pass (GPU).
+        
+        Args:
+            pcm_list: list of PCM byte chunks (16kHz 16-bit mono)
+            
+        Returns:
+            List of audio prompt tensors, each [1, audio_feature_length * hidden_layers, 384]
+        """
+        if not pcm_list:
+            return []
+        
+        from einops import rearrange
+        
+        # Step 1: Compute mel features for each chunk (CPU-bound, fast)
+        mel_batch = []
+        for pcm_bytes in pcm_list:
+            mel = self.pcm_to_mel_features(pcm_bytes)
+            mel_batch.append(mel)
+        
+        # Stack into batch: [N, 80, 3000]
+        batched_mel = torch.cat(mel_batch, dim=0).to(self._device)
+        
+        # Step 2: Single batched Whisper encoder call (GPU)
+        encoder_output = self._whisper.encoder(batched_mel, output_hidden_states=True)
+        hidden_states = encoder_output.hidden_states
+        audio_feats = torch.stack(hidden_states, dim=2)  # [N, T, layers, dim]
+        
+        # Step 3: Post-process each item in the batch
+        audio_fps = 50
+        whisper_idx_multiplier = audio_fps / self._fps
+        padding_nums = int(np.ceil(whisper_idx_multiplier))
+        
+        audio_feats = torch.cat([
+            torch.zeros_like(audio_feats[:, :padding_nums * self._audio_padding_left]),
+            audio_feats,
+            torch.zeros_like(audio_feats[:, :padding_nums * 3 * self._audio_padding_right]),
+        ], dim=1)
+        
+        audio_index = 0
+        audio_clip = audio_feats[:, audio_index:audio_index + self._audio_feature_length]
+        audio_clip = rearrange(audio_clip, 'b c h w -> b (c h) w')
+        audio_prompts_batched = self._pe(audio_clip)
+        
+        # Split back into individual tensors
+        return [audio_prompts_batched[i:i+1] for i in range(len(pcm_list))]
+
     @property
     def is_loaded(self) -> bool:
         return self._whisper is not None

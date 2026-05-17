@@ -66,7 +66,8 @@ class VisualFrameGenerator:
         self._timesteps = torch.tensor([0], device=self._device)
         
         # Try to load ONNX accelerated models
-        self._try_load_onnx()
+        # Disabled: ONNX CUDA EP had worse performance than PyTorch (~15fps vs ~20fps)
+        # self._try_load_onnx()
         
         backend = "ONNX Runtime" if self._use_onnx else "PyTorch"
         print(f"[VFG] Models loaded on {self._device} (backend: {backend})")

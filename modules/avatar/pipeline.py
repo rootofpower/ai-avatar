@@ -226,13 +226,11 @@ class AvatarPipeline:
                 t_start = time.monotonic()
                 batch_size = len(chunks)
 
-                # Step 2: Extract audio features for all chunks
-                audio_prompts = []
-                for c in chunks:
-                    prompt = await loop.run_in_executor(
-                        None, self.afe.extract, c['pcm']
-                    )
-                    audio_prompts.append(prompt)
+                # Step 2: Extract audio features for all chunks (Batched)
+                pcm_list = [c['pcm'] for c in chunks]
+                audio_prompts = await loop.run_in_executor(
+                    None, self.afe.extract_batch, pcm_list
+                )
 
                 # Step 3: Batched GPU inference (UNet + VAE in one pass)
                 frames = await loop.run_in_executor(
