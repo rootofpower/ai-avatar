@@ -163,6 +163,12 @@ class StyleFilter:
         """
         h, w = frame_bgr.shape[:2]
 
+        # Since the avatar background is static and the person position is stable,
+        # we only need to compute the expensive deep learning mask once.
+        if (self._person_mask_cache is not None and
+                self._person_mask_shape == (h, w)):
+            return self._person_mask_cache
+
         if self._segmenter is not None:
             # Mediapipe Tasks API for highly accurate segmentation
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -175,6 +181,8 @@ class StyleFilter:
                 mask[mask > 0.5] = 1.0
                 mask[mask <= 0.5] = 0.0
                 mask = cv2.GaussianBlur(mask, (5, 5), 0)
+                self._person_mask_cache = mask
+                self._person_mask_shape = (h, w)
                 return mask
 
         if self._pt_model is not None:
@@ -193,6 +201,8 @@ class StyleFilter:
             mask = np.zeros((h, w), dtype=np.float32)
             mask[person_prob > 0.5] = 1.0
             mask = cv2.GaussianBlur(mask, (5, 5), 0)
+            self._person_mask_cache = mask
+            self._person_mask_shape = (h, w)
             return mask
 
         # Fallback: Use cached mask if available and same size (face pos doesn't change much)
