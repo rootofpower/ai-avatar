@@ -13,6 +13,9 @@ const btnConnect = document.getElementById('btn-connect');
 const btnDisconnect = document.getElementById('btn-disconnect');
 const statsEl = document.getElementById('stats');
 
+// Create a single MediaStream to hold both tracks
+const remoteStream = new MediaStream();
+
 function setStatus(state, text) {
     statusDot.className = 'status-dot ' + state;
     statusText.textContent = text;
@@ -27,12 +30,14 @@ async function connect() {
     setStatus('connecting', 'Connecting...');
     btnConnect.disabled = true;
 
-    // Prime the audio and video elements to unlock autoplay on iOS/Safari/Chrome
-    const audioEl = document.getElementById('avatar-audio');
-    if (audioEl) {
-        audioEl.play().catch(e => {}); // Ignore error, just unlocks audio context
-    }
-    videoEl.play().catch(e => {});
+    // Reset remote stream and attach to video element
+    // Ensure video element is NOT muted for audio to work
+    videoEl.srcObject = remoteStream;
+    videoEl.muted = false;
+    videoEl.volume = 1.0;
+
+    // Prime the video element to unlock autoplay
+    videoEl.play().catch(e => console.log('[WebRTC] Initial prime play prevented:', e.name));
 
     try {
         // Fetch ICE server config (STUN + TURN) from server
@@ -50,52 +55,40 @@ async function connect() {
 
         pc = new RTCPeerConnection({ iceServers });
 
-        const remoteStream = new MediaStream();
-        videoEl.srcObject = remoteStream;
-
-        const audioEl = document.getElementById('avatar-audio');
-
         // Handle incoming media tracks
         pc.ontrack = (event) => {
             console.log('[WebRTC] Track received:', event.track.kind, event.track.id);
             
+            // Add track to our shared remote stream
+            remoteStream.addTrack(event.track);
+            
             if (event.track.kind === 'video') {
-                remoteStream.addTrack(event.track);
-                videoEl.muted = false;
-                videoEl.play().catch(e => console.warn('[WebRTC] Video Autoplay blocked:', e));
-                console.log('[WebRTC] Video track added to remote stream');
+                console.log('[WebRTC] Video track attached to remote stream');
             } else if (event.track.kind === 'audio') {
-                console.log('[Audio] Element in DOM:', !!document.getElementById('avatar-audio'));
-                const audioEl = document.getElementById('avatar-audio');
-                
-                if (audioEl) {
-                    console.log('[Audio] Element muted status:', audioEl.muted);
-                    const audioStream = new MediaStream([event.track]);
-                    audioEl.srcObject = audioStream;
-                    console.log('[Audio] Tracks in srcObject:', audioEl.srcObject?.getAudioTracks().length);
-                    
-                    audioEl.play()
-                        .then(() => console.log('[Audio] Playback started successfully'))
-                        .catch(e => {
-                            console.error('[Audio] Playback failed:', e);
-                            if (e.name === 'NotAllowedError') {
-                                console.warn('[Audio] Autoplay blocked. Waiting for user gesture...');
-                                const playOnGesture = () => {
-                                    audioEl.play()
-                                        .then(() => {
-                                            console.log('[Audio] Playback started after gesture');
-                                            document.removeEventListener('click', playOnGesture);
-                                        })
-                                        .catch(err => console.error('[Audio] Gesture play failed:', err));
-                                };
-                                document.addEventListener('click', playOnGesture);
-                            }
-                        });
-                } else {
-                    console.error('[Audio] Element #avatar-audio NOT FOUND in DOM during ontrack');
-                }
-                console.log('[WebRTC] Audio track attached to dedicated element');
+                console.log('[WebRTC] Audio track attached to remote stream');
+                console.log('[Audio] Muted status:', event.track.muted);
+                console.log('[Audio] Enabled status:', event.track.enabled);
             }
+
+            // Attempt to play/unmute whenever a track arrives
+            videoEl.muted = false;
+            videoEl.play()
+                .then(() => console.log('[WebRTC] Playback active (Audio/Video combined)'))
+                .catch(e => {
+                    if (e.name === 'NotAllowedError') {
+                        console.warn('[WebRTC] Playback blocked by browser. Click anywhere to unmute.');
+                        const unmuteOnGesture = () => {
+                            videoEl.muted = false;
+                            videoEl.play().then(() => {
+                                console.log('[WebRTC] Playback started after user gesture');
+                                document.removeEventListener('click', unmuteOnGesture);
+                            });
+                        };
+                        document.addEventListener('click', unmuteOnGesture);
+                    } else {
+                        console.error('[WebRTC] Playback error:', e);
+                    }
+                });
         };
 
         // Monitor connection state
@@ -134,8 +127,6 @@ async function connect() {
         pc.onicecandidate = (event) => {
             if (event.candidate) {
                 console.log('[WebRTC] Local ICE candidate:', event.candidate.type, event.candidate.address, event.candidate.port, event.candidate.protocol);
-            } else {
-                console.log('[WebRTC] ICE candidate gathering done (null candidate)');
             }
         };
 
@@ -151,28 +142,18 @@ async function connect() {
         // Wait for ICE gathering to complete (or timeout)
         await new Promise((resolve) => {
             if (pc.iceGatheringState === 'complete') {
-                console.log('[WebRTC] ICE gathering already complete');
                 resolve();
             } else {
                 const checkState = () => {
                     if (pc.iceGatheringState === 'complete') {
                         pc.removeEventListener('icegatheringstatechange', checkState);
-                        console.log('[WebRTC] ICE gathering completed');
                         resolve();
                     }
                 };
                 pc.addEventListener('icegatheringstatechange', checkState);
-                // Timeout after 5s
-                setTimeout(() => {
-                    console.warn('[WebRTC] ICE gathering timed out after 5s');
-                    resolve();
-                }, 5000);
+                setTimeout(resolve, 5000);
             }
         });
-
-        // Count ICE candidates in the offer
-        const candidateCount = (pc.localDescription.sdp.match(/a=candidate:/g) || []).length;
-        console.log(`[WebRTC] Sending offer with ${candidateCount} ICE candidates`);
 
         // Send offer to signaling server
         const response = await fetch('/offer', {
@@ -190,9 +171,6 @@ async function connect() {
         }
 
         const answer = await response.json();
-        const answerCandidates = (answer.sdp.match(/a=candidate:/g) || []).length;
-        console.log(`[WebRTC] Received answer with ${answerCandidates} ICE candidates`);
-
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
         console.log('[WebRTC] Remote description set, waiting for connection...');
 
@@ -215,6 +193,8 @@ function cleanup() {
         pc.close();
         pc = null;
     }
+    // Clear tracks from remoteStream
+    remoteStream.getTracks().forEach(track => track.stop());
     videoEl.srcObject = null;
     btnConnect.disabled = false;
     btnDisconnect.disabled = true;
