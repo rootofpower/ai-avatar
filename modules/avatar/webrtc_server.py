@@ -356,6 +356,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._prebuffer_bytes = int(sample_rate * self.PREBUFFER_MS / 1000) * 2
         self._next_pts_time: Optional[float] = None
         self.speech_time: float = 0.0
+        self._frame_count = 0  # Added for logging
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push resampled 48kHz PCM audio into the buffer."""
@@ -368,6 +369,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._playback_started = False
         self._next_pts_time = None
         self.speech_time = 0.0
+        self._frame_count = 0
         print("[WebRTC] Audio track reset for new turn")
 
     async def recv(self) -> AudioFrame:
@@ -402,13 +404,14 @@ class AvatarAudioTrack(MediaStreamTrack):
                 else:
                     # Return silence while buffering
                     frame_bytes = b'\x00' * needed_bytes
-                    return self._make_frame(frame_bytes)
+                    return self._make_frame(frame_bytes, is_silence=True)
 
             # Normal playback
             if buf_len >= needed_bytes:
                 frame_bytes = bytes(self._buffer[:needed_bytes])
                 del self._buffer[:needed_bytes]
                 self.speech_time += (self._samples_per_frame / self._sample_rate)
+                is_silence = False
             else:
                 # Buffer exhausted — end of speech
                 available = bytes(self._buffer)
@@ -418,19 +421,29 @@ class AvatarAudioTrack(MediaStreamTrack):
                 # Reset speech_time to 0 so video track returns to idle
                 self.speech_time = 0.0
                 print(f"[WebRTC] Audio playback ended (buffer exhausted)")
+                is_silence = len(available) == 0
 
-        return self._make_frame(frame_bytes)
+        return self._make_frame(frame_bytes, is_silence=is_silence)
 
-    def _make_frame(self, frame_bytes: bytes) -> AudioFrame:
+    def _make_frame(self, frame_bytes: bytes, is_silence: bool = False) -> AudioFrame:
         """Build an AudioFrame from raw PCM bytes."""
-        samples = struct.unpack(f'<{self._samples_per_frame}h', frame_bytes)
-        audio_array = np.array(samples, dtype=np.int16).reshape(1, -1)
-        frame = AudioFrame.from_ndarray(audio_array, format='s16', layout='mono')
-        frame.sample_rate = self._sample_rate
-        frame.pts = self._pts
-        frame.time_base = self._time_base
-        self._pts += self._samples_per_frame
-        return frame
+        try:
+            samples = struct.unpack(f'<{self._samples_per_frame}h', frame_bytes)
+            audio_array = np.array(samples, dtype=np.int16).reshape(1, -1)
+            frame = AudioFrame.from_ndarray(audio_array, format='s16', layout='mono')
+            frame.sample_rate = self._sample_rate
+            frame.pts = self._pts
+            frame.time_base = self._time_base
+            self._pts += self._samples_per_frame
+            
+            self._frame_count += 1
+            if self._frame_count % 50 == 0:  # Log every 1 second (50 * 20ms)
+                print(f"[WebRTC Server] Sent {self._frame_count} audio frames (last was {'silence' if is_silence else 'speech'}, pts={self._pts})")
+                
+            return frame
+        except Exception as e:
+            print(f"[WebRTC Server Error] Failed to create audio frame: {e}")
+            raise
 
 
 class WebRTCServer:
