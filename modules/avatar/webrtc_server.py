@@ -342,7 +342,7 @@ class AvatarAudioTrack(MediaStreamTrack):
     """
     kind = "audio"
 
-    PREBUFFER_MS = 200  # accumulate this much audio before starting playback
+    PREBUFFER_MS = 500  # accumulate this much audio before starting playback
 
     def __init__(self, sample_rate: int = 48000):
         super().__init__()
