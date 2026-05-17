@@ -226,18 +226,23 @@ class AvatarPipeline:
                 t_start = time.monotonic()
                 batch_size = len(chunks)
 
-                # Step 2: Extract audio features for all chunks (Batched)
+                # Step 2: Extract audio features
+                t0 = time.monotonic()
                 pcm_list = [c['pcm'] for c in chunks]
                 audio_prompts = await loop.run_in_executor(
                     None, self.afe.extract_batch, pcm_list
                 )
+                t_afe = (time.monotonic() - t0) * 1000
 
-                # Step 3: Batched GPU inference (UNet + VAE in one pass)
+                # Step 3: Batched GPU inference
+                t0 = time.monotonic()
                 frames = await loop.run_in_executor(
                     None, self.vfg.generate_frames_batch, audio_prompts
                 )
+                t_vfg = (time.monotonic() - t0) * 1000
 
                 # Step 4: Apply style filter and submit each frame
+                t0 = time.monotonic()
                 for i, frame in enumerate(frames):
                     if frame is not None:
                         frame = await loop.run_in_executor(
@@ -245,12 +250,13 @@ class AvatarPipeline:
                         )
                     if frame is not None:
                         await self.muxer.submit_frame(frame, chunks[i]['pts'])
+                t_style = (time.monotonic() - t0) * 1000
 
                 t_elapsed = (time.monotonic() - t_start) * 1000
                 q_depth = self.splitter.inference_queue.qsize()
                 effective_fps = batch_size / (t_elapsed / 1000) if t_elapsed > 0 else 0
-                if q_depth > 3 or t_elapsed > 300:
-                    print(f"[Pipeline] Batch: {batch_size}x in {t_elapsed:.0f}ms ({effective_fps:.0f}fps), queue: {q_depth}")
+                if q_depth > 1 or t_elapsed > 200:
+                    print(f"[Pipeline] Batch: {batch_size}x in {t_elapsed:.0f}ms ({effective_fps:.0f}fps) | AFE: {t_afe:.0f}ms, VFG: {t_vfg:.0f}ms, Style: {t_style:.0f}ms | Q: {q_depth}")
 
             except Exception as e:
                 print(f"[Pipeline] Inference error: {e}")
