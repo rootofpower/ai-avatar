@@ -27,20 +27,19 @@ class AVMuxer:
         self.audio_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 
     async def submit_frame(self, frame_bgr: np.ndarray, pts: float,
-                           chunk_duration_ms: int = 200) -> None:
+                           chunk_duration_ms: int = 40) -> None:
         """
         Submit a generated video frame with its PTS.
-        Duplicates the frame to fill the chunk duration at target FPS,
-        and splits audio into matching segments.
+        Splits matching audio into synchronized segments.
 
         Args:
             frame_bgr: BGR numpy array (lip-synced frame)
             pts: presentation timestamp matching the audio chunk
-            chunk_duration_ms: duration of the source audio chunk in ms
+            chunk_duration_ms: duration of the source audio chunk in ms (now 40ms)
         """
         fps = 25
         frame_duration_ms = 1000 / fps  # 40ms
-        num_video_frames = max(1, int(chunk_duration_ms / frame_duration_ms))  # 5
+        num_video_frames = max(1, int(chunk_duration_ms / frame_duration_ms))  # 1
 
         # Retrieve matching audio from delay buffer
         audio_pcm = await self._delay_buffer.read(pts, tolerance=0.5)
