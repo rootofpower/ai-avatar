@@ -343,11 +343,10 @@ class VisualFrameGenerator:
         # Stack into batches
         batched_latents = torch.cat(latents, dim=0)
         batched_audio = torch.cat(audio_prompts, dim=0)
-        batched_timesteps = self._timesteps.expand(batch_size)
         
         # Convert to numpy for ONNX Runtime
         sample_np = batched_latents.cpu().numpy().astype(np.float16)
-        timestep_np = batched_timesteps.cpu().numpy().astype(np.int64)
+        timestep_np = np.zeros(batch_size, dtype=np.int64)
         hidden_np = batched_audio.cpu().numpy().astype(np.float16)
         
         # UNet inference via ONNX

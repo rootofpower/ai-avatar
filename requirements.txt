@@ -35,4 +35,6 @@ av
 omegaconf
 mediapipe
 onnxruntime-gpu
+onnx
+onnxscript
 tensorrt

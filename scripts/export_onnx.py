@@ -56,15 +56,15 @@ def export_unet(models_dir: str, output_dir: str):
 
     wrapper = UNetWrapper(unet).eval().cuda()
 
-    # Dummy inputs (batch=1, will use dynamic axes for batching)
-    dummy_sample = torch.randn(1, 8, 32, 32, dtype=torch.float16, device='cuda')
-    dummy_timestep = torch.tensor([0], dtype=torch.long, device='cuda')
-    dummy_hidden = torch.randn(1, 50, 384, dtype=torch.float16, device='cuda')
+    # Use batch=4 dummy inputs so ONNX graph captures batch-aware operations
+    EXPORT_BATCH = 4
+    dummy_sample = torch.randn(EXPORT_BATCH, 8, 32, 32, dtype=torch.float16, device='cuda')
+    dummy_timestep = torch.zeros(EXPORT_BATCH, dtype=torch.long, device='cuda')
+    dummy_hidden = torch.randn(EXPORT_BATCH, 50, 384, dtype=torch.float16, device='cuda')
 
     output_path = os.path.join(output_dir, "unet.onnx")
-    print(f"[Export] Exporting UNet to {output_path}...")
+    print(f"[Export] Exporting UNet to {output_path} (traced with batch={EXPORT_BATCH})...")
 
-    # Disable SDPA for clean ONNX export
     with torch.no_grad():
         torch.onnx.export(
             wrapper,
@@ -74,6 +74,7 @@ def export_unet(models_dir: str, output_dir: str):
             output_names=['output'],
             dynamic_axes={
                 'sample': {0: 'batch'},
+                'timestep': {0: 'batch'},
                 'encoder_hidden_states': {0: 'batch'},
                 'output': {0: 'batch'}
             },
@@ -96,9 +97,10 @@ def export_vae_decoder(models_dir: str, output_dir: str):
 
     wrapper = VAEDecoderWrapper(vae).eval().cuda()
 
-    dummy_latent = torch.randn(1, 4, 32, 32, dtype=torch.float16, device='cuda')
+    EXPORT_BATCH = 4
+    dummy_latent = torch.randn(EXPORT_BATCH, 4, 32, 32, dtype=torch.float16, device='cuda')
     output_path = os.path.join(output_dir, "vae_decoder.onnx")
-    print(f"[Export] Exporting VAE decoder to {output_path}...")
+    print(f"[Export] Exporting VAE decoder to {output_path} (traced with batch={EXPORT_BATCH})...")
 
     with torch.no_grad():
         torch.onnx.export(
@@ -129,39 +131,44 @@ def verify_exports(output_dir: str):
 
     import numpy as np
 
-    for name, input_shapes in [
-        ("unet.onnx", {
-            'sample': (1, 8, 32, 32),
-            'timestep': (1,),
-            'encoder_hidden_states': (1, 50, 384),
-        }),
-        ("vae_decoder.onnx", {
-            'latent': (1, 4, 32, 32),
-        }),
-    ]:
-        path = os.path.join(output_dir, name)
-        if not os.path.exists(path):
-            print(f"[Verify] {name} not found, skipping")
-            continue
+    # Test with both batch=1 and batch=4 to verify dynamic batching works
+    for test_batch in [1, 4]:
+        print(f"\n--- Verification with batch={test_batch} ---")
+        for name, input_shapes in [
+            ("unet.onnx", {
+                'sample': (test_batch, 8, 32, 32),
+                'timestep': (test_batch,),
+                'encoder_hidden_states': (test_batch, 50, 384),
+            }),
+            ("vae_decoder.onnx", {
+                'latent': (test_batch, 4, 32, 32),
+            }),
+        ]:
+            path = os.path.join(output_dir, name)
+            if not os.path.exists(path):
+                print(f"[Verify] {name} not found, skipping")
+                continue
 
-        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        try:
-            sess = ort.InferenceSession(path, providers=providers)
-            active = sess.get_providers()[0]
-            print(f"[Verify] {name} loaded with {active}")
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            try:
+                sess = ort.InferenceSession(path, providers=providers)
+                active = sess.get_providers()[0]
 
-            # Run test inference
-            inputs = {}
-            for inp_name, shape in input_shapes.items():
-                if 'timestep' in inp_name:
-                    inputs[inp_name] = np.zeros(shape, dtype=np.int64)
-                else:
-                    inputs[inp_name] = np.random.randn(*shape).astype(np.float16)
+                inputs = {}
+                for inp_name, shape in input_shapes.items():
+                    if 'timestep' in inp_name:
+                        inputs[inp_name] = np.zeros(shape, dtype=np.int64)
+                    else:
+                        inputs[inp_name] = np.random.randn(*shape).astype(np.float16)
 
-            outputs = sess.run(None, inputs)
-            print(f"[Verify] {name} output shape: {outputs[0].shape}")
-        except Exception as e:
-            print(f"[Verify] {name} verification failed: {e}")
+                import time
+                t0 = time.monotonic()
+                outputs = sess.run(None, inputs)
+                t1 = time.monotonic()
+                ms = (t1 - t0) * 1000
+                print(f"[Verify] {name} batch={test_batch}: output={outputs[0].shape}, {ms:.1f}ms ({active})")
+            except Exception as e:
+                print(f"[Verify] {name} batch={test_batch} FAILED: {e}")
 
 
 if __name__ == "__main__":
