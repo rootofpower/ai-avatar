@@ -367,7 +367,9 @@ class AvatarAudioTrack(MediaStreamTrack):
         """Reset for a new conversation turn."""
         self._buffer.clear()
         self._playback_active = False
-        self._next_pts_time = None
+        # Do NOT reset self._next_pts_time here! 
+        # recv() depends on it for continuous pacing. Setting it to None 
+        # while recv() is sleeping causes a TypeError (None + float) upon waking up.
         self.speech_time = 0.0
         self._frame_count = 0
         print("[WebRTC] Audio track reset for new turn")
