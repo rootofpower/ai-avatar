@@ -193,7 +193,6 @@ function cleanup() {
         pc.close();
         pc = null;
     }
-    // Clear tracks from remoteStream
     remoteStream.getTracks().forEach(track => track.stop());
     videoEl.srcObject = null;
     btnConnect.disabled = false;
