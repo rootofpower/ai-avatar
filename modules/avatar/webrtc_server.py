@@ -342,7 +342,7 @@ class AvatarAudioTrack(MediaStreamTrack):
     """
     kind = "audio"
 
-    PREBUFFER_MS = 500  # accumulate this much audio before starting playback
+    PREBUFFER_MS = 300  # accumulate this much audio before starting playback
 
     def __init__(self, sample_rate: int = 48000):
         super().__init__()
@@ -352,7 +352,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._time_base = fractions.Fraction(1, sample_rate)
         self._buffer = bytearray()
         self._lock = asyncio.Lock()
-        self._playback_started = False
+        self._playback_active = False
         self._prebuffer_bytes = int(sample_rate * self.PREBUFFER_MS / 1000) * 2
         self._next_pts_time: Optional[float] = None
         self.speech_time: float = 0.0
@@ -366,7 +366,7 @@ class AvatarAudioTrack(MediaStreamTrack):
     def reset(self) -> None:
         """Reset for a new conversation turn."""
         self._buffer.clear()
-        self._playback_started = False
+        self._playback_active = False
         self._next_pts_time = None
         self.speech_time = 0.0
         self._frame_count = 0
@@ -395,10 +395,10 @@ class AvatarAudioTrack(MediaStreamTrack):
         async with self._lock:
             buf_len = len(self._buffer)
 
-            # Pre-buffer: wait until we have enough audio before starting
-            if not self._playback_started:
+            # State 1: Buffering (Waiting for PREBUFFER_MS)
+            if not self._playback_active:
                 if buf_len >= self._prebuffer_bytes:
-                    self._playback_started = True
+                    self._playback_active = True
                     self.speech_time = 0.0
                     print(f"[WebRTC] Audio playback started (buffered {buf_len} bytes)")
                 else:
@@ -406,22 +406,29 @@ class AvatarAudioTrack(MediaStreamTrack):
                     frame_bytes = b'\x00' * needed_bytes
                     return self._make_frame(frame_bytes, is_silence=True)
 
-            # Normal playback
+            # State 2: Active Playback
             if buf_len >= needed_bytes:
+                # We have data — play it
                 frame_bytes = bytes(self._buffer[:needed_bytes])
                 del self._buffer[:needed_bytes]
                 self.speech_time += (self._samples_per_frame / self._sample_rate)
                 is_silence = False
             else:
-                # Buffer exhausted — end of speech
-                available = bytes(self._buffer)
-                self._buffer.clear()
-                self._playback_started = False
-                frame_bytes = available + b'\x00' * (needed_bytes - len(available))
-                # Reset speech_time to 0 so video track returns to idle
-                self.speech_time = 0.0
-                print(f"[WebRTC] Audio playback ended (buffer exhausted)")
-                is_silence = len(available) == 0
+                # Buffer Underflow: Don't reset playback state immediately!
+                # Instead, send silence and stay in active state. 
+                # This handles network jitter and small Gemini chunks smoothly.
+                frame_bytes = b'\x00' * needed_bytes
+                is_silence = True
+                
+                # Only end speech if buffer has been empty for a while
+                # (handled by speech_time logic in video track if needed)
+                # For simplicity, we just keep sending silence until reset() is called
+                # by the main loop at the end of the turn.
+                
+                # Optional: if no data for 2 seconds, consider it "ended"
+                if buf_len == 0:
+                     # self.speech_time = 0.0 # This would switch video to idle
+                     pass
 
         return self._make_frame(frame_bytes, is_silence=is_silence)
 
@@ -508,7 +515,7 @@ class WebRTCServer:
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push audio to all connected audio tracks."""
         if not self._audio_tracks:
-            print("[WebRTC] WARNING: Received audio from Gemini, but no WebRTC client is connected to play it!")
+            # print("[WebRTC] WARNING: Received audio from Gemini, but no WebRTC client is connected to play it!")
             return
         for track in self._audio_tracks:
             await track.push_audio(pcm_48k)
