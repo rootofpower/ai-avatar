@@ -46,15 +46,22 @@ async function connect() {
         const remoteStream = new MediaStream();
         videoEl.srcObject = remoteStream;
 
+        const audioEl = document.getElementById('avatar-audio');
+
         // Handle incoming media tracks
         pc.ontrack = (event) => {
             console.log('[WebRTC] Track received:', event.track.kind, event.track.id);
-            remoteStream.addTrack(event.track);
             
             if (event.track.kind === 'video') {
+                remoteStream.addTrack(event.track);
                 videoEl.muted = false;
-                videoEl.play().catch(e => console.warn('[WebRTC] Autoplay blocked:', e));
+                videoEl.play().catch(e => console.warn('[WebRTC] Video Autoplay blocked:', e));
                 console.log('[WebRTC] Video track added to remote stream');
+            } else if (event.track.kind === 'audio') {
+                const audioStream = new MediaStream([event.track]);
+                audioEl.srcObject = audioStream;
+                audioEl.play().catch(e => console.warn('[WebRTC] Audio Autoplay blocked:', e));
+                console.log('[WebRTC] Audio track attached to dedicated element');
             }
         };
 
