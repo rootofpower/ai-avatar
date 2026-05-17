@@ -357,6 +357,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         self._next_pts_time: Optional[float] = None
         self.speech_time: float = 0.0
         self._frame_count = 0  # Added for logging
+        self._underflow_start_time: Optional[float] = None
 
     async def push_audio(self, pcm_48k: bytes) -> None:
         """Push resampled 48kHz PCM audio into the buffer."""
@@ -372,6 +373,7 @@ class AvatarAudioTrack(MediaStreamTrack):
         # while recv() is sleeping causes a TypeError (None + float) upon waking up.
         self.speech_time = 0.0
         self._frame_count = 0
+        self._underflow_start_time = None
         print("[WebRTC] Audio track reset for new turn")
 
     async def recv(self) -> AudioFrame:
@@ -402,6 +404,7 @@ class AvatarAudioTrack(MediaStreamTrack):
                 if buf_len >= self._prebuffer_bytes:
                     self._playback_active = True
                     self.speech_time = 0.0
+                    self._underflow_start_time = None
                     print(f"[WebRTC] Audio playback started (buffered {buf_len} bytes)")
                 else:
                     # Return silence while buffering
@@ -414,6 +417,7 @@ class AvatarAudioTrack(MediaStreamTrack):
                 frame_bytes = bytes(self._buffer[:needed_bytes])
                 del self._buffer[:needed_bytes]
                 self.speech_time += (self._samples_per_frame / self._sample_rate)
+                self._underflow_start_time = None
                 is_silence = False
             else:
                 # Buffer Underflow: Don't reset playback state immediately!
@@ -422,15 +426,16 @@ class AvatarAudioTrack(MediaStreamTrack):
                 frame_bytes = b'\x00' * needed_bytes
                 is_silence = True
                 
-                # Only end speech if buffer has been empty for a while
-                # (handled by speech_time logic in video track if needed)
-                # For simplicity, we just keep sending silence until reset() is called
-                # by the main loop at the end of the turn.
+                # Monitor underflow duration to signal end-of-speech
+                if self._underflow_start_time is None:
+                    self._underflow_start_time = _time.monotonic()
                 
-                # Optional: if no data for 2 seconds, consider it "ended"
-                if buf_len == 0:
-                     # self.speech_time = 0.0 # This would switch video to idle
-                     pass
+                # If we've been underflowing (sending silence) for > 1.0s, 
+                # reset speech_time to 0 so the video track transitions to idle.
+                if _time.monotonic() - self._underflow_start_time > 1.0:
+                    if self.speech_time > 0:
+                        print("[WebRTC] Audio underflow timeout (>1s) — resetting speech clock")
+                        self.speech_time = 0.0
 
         return self._make_frame(frame_bytes, is_silence=is_silence)
 
