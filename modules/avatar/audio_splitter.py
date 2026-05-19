@@ -28,6 +28,7 @@ class AudioSplitter:
 
         self._accumulator = bytearray()
         self._samples_processed = 0
+        self._inference_samples_emitted = 0
         self._base_time: Optional[float] = None
         self._running = False
 
@@ -86,20 +87,34 @@ class AudioSplitter:
                 pass
             self.transport_queue.put_nowait(transport_segment)
 
-        # Inference queue: accumulate until 200ms chunk is formed
+        # Inference queue: sliding window of 200ms (3200 samples) at 40ms steps (640 samples)
         self._accumulator.extend(pcm_16k)
-        chunk_bytes = self.CHUNK_SAMPLES * self.SAMPLE_WIDTH
 
-        while len(self._accumulator) >= chunk_bytes:
-            chunk_data = bytes(self._accumulator[:chunk_bytes])
-            del self._accumulator[:chunk_bytes]
+        WINDOW_SIZE_SAMPLES = 3200
+        PAST_CONTEXT_SAMPLES = 1280
+        FUTURE_CONTEXT_SAMPLES = 1920
+        STEP_SAMPLES = 640
 
-            chunk_pts = pts - (len(self._accumulator) / self.SAMPLE_WIDTH / self.TARGET_SAMPLE_RATE)
+        while (len(self._accumulator) // self.SAMPLE_WIDTH) >= (self._inference_samples_emitted + FUTURE_CONTEXT_SAMPLES):
+            S = self._inference_samples_emitted
+            start_sample = S - PAST_CONTEXT_SAMPLES
+            end_sample = S + FUTURE_CONTEXT_SAMPLES
+
+            if start_sample < 0:
+                silence_samples = -start_sample
+                actual_samples = WINDOW_SIZE_SAMPLES - silence_samples
+                chunk_data = b'\x00' * (silence_samples * self.SAMPLE_WIDTH) + \
+                             self._accumulator[0 : actual_samples * self.SAMPLE_WIDTH]
+            else:
+                chunk_data = self._accumulator[start_sample * self.SAMPLE_WIDTH : end_sample * self.SAMPLE_WIDTH]
+
+            chunk_pts = S / self.TARGET_SAMPLE_RATE
             inference_chunk = {
-                'pcm': chunk_data,
+                'pcm': bytes(chunk_data),
                 'pts': chunk_pts,
-                'samples': self.CHUNK_SAMPLES,
+                'samples': STEP_SAMPLES,
             }
+
             try:
                 self.inference_queue.put_nowait(inference_chunk)
             except asyncio.QueueFull:
@@ -109,10 +124,13 @@ class AudioSplitter:
                     pass
                 self.inference_queue.put_nowait(inference_chunk)
 
+            self._inference_samples_emitted += STEP_SAMPLES
+
     def reset(self) -> None:
         """Reset state for a new conversation turn."""
         self._accumulator.clear()
         self._samples_processed = 0
+        self._inference_samples_emitted = 0
         self._base_time = None
         # Drain queues
         for q in (self.inference_queue, self.transport_queue):

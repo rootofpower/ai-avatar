@@ -32,6 +32,7 @@ class AvatarPipeline:
         device: str = "cuda",
         fps: int = 25,
         webrtc_port: int = 8080,
+        driving_speed_multiplier: float = 0.5,
     ):
         self._models_dir = models_dir
         self._avatar_image = avatar_image
@@ -53,6 +54,7 @@ class AvatarPipeline:
         self.vfg = VisualFrameGenerator(
             models_dir=models_dir,
             device=device,
+            speed_multiplier=driving_speed_multiplier,
         )
         self.encoder = VideoEncoder(fps=fps)
         self.muxer = AVMuxer(self.delay_buffer)
@@ -148,6 +150,13 @@ class AvatarPipeline:
 
         # 2. Feed to splitter for video inference
         await self.splitter.feed(pcm_24k)
+
+    async def flush(self) -> None:
+        """Flush remaining audio through the pipeline by feeding silence."""
+        if self._running:
+            # Feed 160ms of silence to push the remaining audio frames through
+            silence_24k = b'\x00' * (24000 * 2 * 160 // 1000)
+            await self.feed_audio(silence_24k)
 
     def _resample_24k_to_48k(self, pcm_24k: bytes) -> bytes:
         """Resample 24kHz to 48kHz (1:2 ratio — duplicate each sample)."""

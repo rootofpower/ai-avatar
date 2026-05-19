@@ -91,12 +91,13 @@ class AudioFeatureExtractor:
         return features.to(dtype=self._weight_dtype)
 
     @torch.no_grad()
+    @torch.no_grad()
     def extract(self, pcm_bytes: bytes) -> torch.Tensor:
         """
         Extract audio features from a PCM chunk for MuseTalk.
 
         Args:
-            pcm_bytes: 16kHz 16-bit mono PCM
+            pcm_bytes: 16kHz 16-bit mono PCM (200ms centered window, 3200 samples)
 
         Returns:
             Audio prompt tensor ready for MuseTalk UNet cross-attention.
@@ -111,21 +112,9 @@ class AudioFeatureExtractor:
         hidden_states = encoder_output.hidden_states
         audio_feats = torch.stack(hidden_states, dim=2)  # [B, T, layers, dim]
 
-        # Calculate the frame index for the audio
-        audio_fps = 50  # Whisper's internal frame rate
-        whisper_idx_multiplier = audio_fps / self._fps
-
-        # Add padding (matching MuseTalk's audio_processor.py logic)
-        padding_nums = int(np.ceil(whisper_idx_multiplier))
-        audio_feats = torch.cat([
-            torch.zeros_like(audio_feats[:, :padding_nums * self._audio_padding_left]),
-            audio_feats,
-            torch.zeros_like(audio_feats[:, :padding_nums * 3 * self._audio_padding_right]),
-        ], dim=1)
-
-        # Extract clip for a single frame
-        audio_index = 0
-        audio_clip = audio_feats[:, audio_index:audio_index + self._audio_feature_length]
+        # Since the input chunk is already a 200ms centered window,
+        # directly slice the first self._audio_feature_length (10) frames
+        audio_clip = audio_feats[:, 0:self._audio_feature_length]
 
         # Reshape: from [B, time, layers, dim] to [B, time*layers, dim]
         from einops import rearrange
@@ -170,18 +159,7 @@ class AudioFeatureExtractor:
         audio_feats = torch.stack(hidden_states, dim=2)  # [N, T, layers, dim]
         
         # Step 3: Post-process each item in the batch
-        audio_fps = 50
-        whisper_idx_multiplier = audio_fps / self._fps
-        padding_nums = int(np.ceil(whisper_idx_multiplier))
-        
-        audio_feats = torch.cat([
-            torch.zeros_like(audio_feats[:, :padding_nums * self._audio_padding_left]),
-            audio_feats,
-            torch.zeros_like(audio_feats[:, :padding_nums * 3 * self._audio_padding_right]),
-        ], dim=1)
-        
-        audio_index = 0
-        audio_clip = audio_feats[:, audio_index:audio_index + self._audio_feature_length]
+        audio_clip = audio_feats[:, 0:self._audio_feature_length]
         audio_clip = rearrange(audio_clip, 'b c h w -> b (c h) w')
         audio_prompts_batched = self._pe(audio_clip)
         

@@ -158,6 +158,10 @@ class VoiceAssistant:
                 if is_final:
                     break
             
+            # Flush the remaining audio to render the final video frames
+            if self.avatar_pipeline and self.avatar_pipeline.is_active:
+                await self.avatar_pipeline.flush()
+            
             # Save and play complete audio
             if audio_chunks:
                 complete_audio = b"".join(audio_chunks)

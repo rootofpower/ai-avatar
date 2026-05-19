@@ -30,6 +30,7 @@ class VisualFrameGenerator:
         unet_config: str = None,
         unet_model_path: str = None,
         vae_type: str = "sd-vae",
+        speed_multiplier: float = 0.5,
     ):
         self._models_dir = models_dir
         self._device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -56,7 +57,8 @@ class VisualFrameGenerator:
 
         # Sequence data for dynamic driving video
         self._ref_frames = []
-        self._frame_idx = 0
+        self._frame_idx = 0.0
+        self._speed_multiplier = speed_multiplier
 
     def load(self) -> None:
         """Load VAE and UNet models. Call once at startup."""
@@ -291,8 +293,9 @@ class VisualFrameGenerator:
 
         # Determine which reference data to use (static image or next video frame)
         if hasattr(self, '_ref_frames') and self._ref_frames:
-            frame_data = self._ref_frames[self._frame_idx]
-            self._frame_idx = (self._frame_idx + 1) % len(self._ref_frames)
+            idx = int(self._frame_idx)
+            frame_data = self._ref_frames[idx]
+            self._frame_idx = (self._frame_idx + self._speed_multiplier) % len(self._ref_frames)
         else:
             frame_data = {
                 'image': self._ref_image,
@@ -409,8 +412,9 @@ class VisualFrameGenerator:
         latent_inputs = []
         for _ in range(batch_size):
             if hasattr(self, '_ref_frames') and self._ref_frames:
-                fd = self._ref_frames[self._frame_idx]
-                self._frame_idx = (self._frame_idx + 1) % len(self._ref_frames)
+                idx = int(self._frame_idx)
+                fd = self._ref_frames[idx]
+                self._frame_idx = (self._frame_idx + self._speed_multiplier) % len(self._ref_frames)
             else:
                 fd = {
                     'image': self._ref_image,
