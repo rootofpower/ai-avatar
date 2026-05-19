@@ -163,9 +163,16 @@ class AvatarPipeline:
     async def flush(self) -> None:
         """Flush remaining audio through the pipeline by feeding silence."""
         if self._running:
-            # Feed 320ms of silence to push the remaining audio frames through
-            # and naturally close the lips at the end of speech.
-            silence_24k = b'\x00' * (24000 * 2 * 320 // 1000)
+            # Feed silence to let the lips close and head/body movements continue naturally.
+            # Get duration from environment (in ms), defaulting to 1500ms (1.5s).
+            silence_ms = 1500
+            env_val = os.getenv("AVATAR_FLUSH_SILENCE_MS")
+            if env_val:
+                try:
+                    silence_ms = int(env_val)
+                except ValueError:
+                    pass
+            silence_24k = b'\x00' * (24000 * 2 * silence_ms // 1000)
             await self.feed_audio(silence_24k)
 
     def _resample_24k_to_48k(self, pcm_24k: bytes) -> bytes:
