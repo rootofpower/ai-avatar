@@ -245,6 +245,14 @@ class AvatarVideoTrack(MediaStreamTrack):
         
         # Show speech frames when audio is playing OR queued frames exist
         has_queued_frames = not self._muxer.video_queue.empty()
+        
+        # If the state is not 'talking' and no queued frames remain, immediately clear
+        # speech cache so we start cross-fading to idle without any freeze.
+        if state != "talking" and not has_queued_frames:
+            self._current_speech_frame = None
+            self._prev_speech_frame = None
+            self._current_speech_pts = -1.0
+            
         is_speaking = target_pts > 0 or has_queued_frames or self._current_speech_frame is not None
         
         if is_speaking:
@@ -466,14 +474,14 @@ class WebRTCServer:
     Serves the client HTML and handles SDP/ICE exchange.
     """
 
-    def __init__(self, muxer):
+    def __init__(self, muxer, style_filter: Optional[StyleFilter] = None):
         self._muxer = muxer
         self._pcs: set = set()
         self._reference_image: Optional[np.ndarray] = None
         self._driving_videos: dict = {}
         self._audio_tracks: list = []  # active audio tracks for pushing audio
         self._video_tracks: list = []  # active video tracks for reset
-        self._style_filter = StyleFilter()
+        self._style_filter = style_filter if style_filter is not None else StyleFilter()
 
         # ZeroTier networking: no STUN/TURN servers needed
         self._ice_servers = []

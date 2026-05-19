@@ -56,10 +56,10 @@ class AvatarPipeline:
             device=device,
             speed_multiplier=driving_speed_multiplier,
         )
+        self.style_filter = StyleFilter()
         self.encoder = VideoEncoder(fps=fps)
         self.muxer = AVMuxer(self.delay_buffer)
-        self.webrtc = WebRTCServer(self.muxer)
-        self.style_filter = StyleFilter()
+        self.webrtc = WebRTCServer(self.muxer, style_filter=self.style_filter)
 
         self._inference_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
