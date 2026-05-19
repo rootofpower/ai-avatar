@@ -248,6 +248,7 @@ class AvatarVideoTrack(MediaStreamTrack):
         
         # If the state is not 'talking' and no queued frames remain, immediately clear
         # speech cache so we start cross-fading to idle without any freeze.
+        state = self._animator._state
         if state != "talking" and not has_queued_frames:
             self._current_speech_frame = None
             self._prev_speech_frame = None
