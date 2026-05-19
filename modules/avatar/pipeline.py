@@ -1,6 +1,7 @@
 
 import asyncio
 import time
+import os
 from typing import Optional
 
 from modules.avatar.audio_splitter import AudioSplitter
@@ -32,7 +33,7 @@ class AvatarPipeline:
         device: str = "cuda",
         fps: int = 25,
         webrtc_port: int = 8080,
-        driving_speed_multiplier: float = 0.5,
+        driving_speed_multiplier: float = 0.75,
     ):
         self._models_dir = models_dir
         self._avatar_image = avatar_image
@@ -42,6 +43,14 @@ class AvatarPipeline:
         self._device = device
         self._fps = fps
         self._webrtc_port = webrtc_port
+
+        # Load driving speed from environment if present, otherwise default to 0.75
+        speed_env = os.getenv("AVATAR_TALKING_SPEED")
+        if speed_env:
+            try:
+                driving_speed_multiplier = float(speed_env)
+            except ValueError:
+                pass
 
         # Pipeline components
         self.splitter = AudioSplitter()
@@ -154,8 +163,9 @@ class AvatarPipeline:
     async def flush(self) -> None:
         """Flush remaining audio through the pipeline by feeding silence."""
         if self._running:
-            # Feed 160ms of silence to push the remaining audio frames through
-            silence_24k = b'\x00' * (24000 * 2 * 160 // 1000)
+            # Feed 320ms of silence to push the remaining audio frames through
+            # and naturally close the lips at the end of speech.
+            silence_24k = b'\x00' * (24000 * 2 * 320 // 1000)
             await self.feed_audio(silence_24k)
 
     def _resample_24k_to_48k(self, pcm_24k: bytes) -> bytes:
