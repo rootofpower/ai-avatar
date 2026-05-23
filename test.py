@@ -25,8 +25,8 @@ def test_voice_filter_integration():
         sample_rate=sr,
         enabled=os.getenv("AVATAR_VOICE_FILTER_ENABLED", "true").lower() == "true",
         pitch_ratio=float(os.getenv("AVATAR_VOICE_FILTER_PITCH", "1.20")),
-        hpf_cutoff=float(os.getenv("AVATAR_VOICE_FILTER_HPF", "220.0")),
-        eq_gain=float(os.getenv("AVATAR_VOICE_FILTER_EQ_GAIN", "4.0")),
+        hpf_cutoff=float(os.getenv("AVATAR_VOICE_FILTER_HPF", "130.0")),
+        eq_gain=float(os.getenv("AVATAR_VOICE_FILTER_EQ_GAIN", "3.0")),
     )
 
     # Chunk size of 20ms at 24kHz = 480 samples = 960 bytes
