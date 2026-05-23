@@ -460,7 +460,7 @@ class AvatarAudioTrack(MediaStreamTrack):
             self._pts += self._samples_per_frame
             
             self._frame_count += 1
-            if self._frame_count % 50 == 0:  # Log every 1 second (50 * 20ms)
+            if self._frame_count % 50 == 0 and not is_silence:  # Log every 1 second (50 * 20ms) during speech
                 print(f"[WebRTC Server] Sent {self._frame_count} audio frames (last was {'silence' if is_silence else 'speech'}, pts={self._pts})")
                 
             return frame
