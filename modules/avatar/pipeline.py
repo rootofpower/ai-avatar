@@ -70,6 +70,16 @@ class AvatarPipeline:
         self.muxer = AVMuxer(self.delay_buffer)
         self.webrtc = WebRTCServer(self.muxer, style_filter=self.style_filter)
 
+        # Voice filter component (young girl voice filter)
+        from modules.avatar.voice_filter import VoiceFilter
+        self.voice_filter = VoiceFilter(
+            sample_rate=24000,
+            enabled=os.getenv("AVATAR_VOICE_FILTER_ENABLED", "true").lower() == "true",
+            pitch_ratio=float(os.getenv("AVATAR_VOICE_FILTER_PITCH", "1.20")),
+            hpf_cutoff=float(os.getenv("AVATAR_VOICE_FILTER_HPF", "220.0")),
+            eq_gain=float(os.getenv("AVATAR_VOICE_FILTER_EQ_GAIN", "4.0")),
+        )
+
         self._inference_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
         self._running = False
@@ -152,6 +162,9 @@ class AvatarPipeline:
         """
         if not self._running or not pcm_24k:
             return
+
+        # Apply young girl voice filter (pitch shifter + EQ)
+        pcm_24k = self.voice_filter.process(pcm_24k)
 
         # 1. Push audio directly to WebRTC for immediate playback
         pcm_48k = self._resample_24k_to_48k(pcm_24k)
