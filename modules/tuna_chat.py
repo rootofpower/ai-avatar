@@ -12,7 +12,7 @@ load_dotenv()
 logger = logging.getLogger("tuna_chat")
 logger.setLevel(logging.INFO)
 
-TUNA_API_BASE_URL = os.getenv("TUNA_API_URL", "http://localhost")
+TUNA_API_BASE_URL = os.getenv("TUNA_API_URL", "http://localhost:11136")
 
 
 class TunaChatAPI:
@@ -42,7 +42,7 @@ class TunaChatAPI:
                 async with session.post(
                     self.chat_endpoint,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5),
+                    timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
                     logger.info("Response received | status=%s, content_type=%s", resp.status, resp.content_type)
                     logger.debug("Response headers: %s", dict(resp.headers))
@@ -72,7 +72,7 @@ class TunaChatAPI:
             logger.debug("Full traceback:\n%s", traceback.format_exc())
             return None
         except asyncio.TimeoutError:
-            logger.error("Request timed out after 5s to %s", self.chat_endpoint)
+            logger.error("Request timed out after 20s to %s", self.chat_endpoint)
             return None
         except aiohttp.ClientError as e:
             logger.error("TUNA API ClientError | type=%s, detail=%s", type(e).__name__, e)
