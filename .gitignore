@@ -39,3 +39,5 @@ thesis-watch.pdf
 architecture_comparison.md.resolved
 
 pyrefly.toml
+# Logs
+*.log
